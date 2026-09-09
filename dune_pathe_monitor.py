@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Surveille toute trace de séance de Dune 3 à Pathé Odysseum."""
+"""Surveille toute trace de séance ou prévente de Dune 3 à Pathé Odysseum (Montpellier)."""
 
 from __future__ import annotations
 
@@ -9,14 +9,12 @@ import json
 import logging
 import os
 import re
-import smtplib
 import sys
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -28,6 +26,51 @@ PARIS = ZoneInfo("Europe/Paris")
 DEFAULT_START = date(2026, 12, 16)
 WEEKDAYS_FR = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
 MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.")
+
+STEALTH_INIT_SCRIPT = """
+// Masquage de navigator.webdriver
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined
+});
+
+// Simulation de l'objet chrome
+window.chrome = {
+    runtime: {},
+    loadTimes: function() {},
+    csi: function() {},
+    app: {}
+};
+
+// Plugins factices
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5]
+});
+
+// Langues francophones par défaut
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['fr-FR', 'fr', 'en-US', 'en']
+});
+"""
+
+
+def is_dune_3(text: str) -> bool:
+    """Détecte les mentions spécifiques à Dune 3 / Troisième partie / Part Three."""
+    t = text.lower()
+    if "dune" not in t:
+        return False
+    keywords = (
+        "troisième",
+        "troisieme",
+        "partie 3",
+        "part 3",
+        "part three",
+        "partie iii",
+        "part iii",
+        "dune 3",
+        "messiah",
+        "messie",
+    )
+    return any(kw in t for kw in keywords)
 
 
 @dataclass(frozen=True)
@@ -79,7 +122,7 @@ def save_state(path: Path, sessions: list[Session]) -> None:
 def notify_telegram(message: str, log: logging.Logger) -> bool:
     token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        log.warning("Nouvelle disponibilité, mais Telegram n'est pas configuré.")
+        log.warning("Telegram non configuré (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant).")
         return False
     payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
     request = urllib.request.Request(
@@ -88,7 +131,7 @@ def notify_telegram(message: str, log: logging.Logger) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             if response.status != 200:
-                log.error("Telegram a répondu %s", response.status)
+                log.error("Telegram a répondu avec le statut %s", response.status)
                 return False
             return True
     except Exception as exc:
@@ -97,96 +140,44 @@ def notify_telegram(message: str, log: logging.Logger) -> bool:
 
 
 def notify_ntfy(message: str, log: logging.Logger) -> bool:
-    """Envoie une notification push ntfy ; le sujet reste un secret GitHub."""
+    """Envoie une notification push ntfy vers un topic public ou protégé."""
     topic = os.getenv("NTFY_TOPIC")
     if not topic:
-        log.warning("ntfy n'est pas configuré.")
+        log.warning("ntfy non configuré (NTFY_TOPIC manquant).")
         return False
     server = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
-    headers = {"Title": "Dune 3 — Pathé Odysseum", "Priority": "urgent", "Tags": "movie_camera"}
+    headers = {
+        "Title": "Dune 3 — Pathé Odysseum",
+        "Priority": "urgent",
+        "Tags": "movie_camera,ticket",
+    }
     if token := os.getenv("NTFY_TOKEN"):
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(f"{server}/{topic}", data=message.encode("utf-8"), headers=headers, method="POST")
+    request = urllib.request.Request(
+        f"{server}/{topic}",
+        data=message.encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            return 200 <= response.status < 300
+            if 200 <= response.status < 300:
+                return True
+            log.error("ntfy a répondu avec le statut %s", response.status)
+            return False
     except Exception as exc:
         log.error("Envoi ntfy impossible : %s", exc)
         return False
 
 
-def notify_email(message: str, log: logging.Logger) -> bool:
-    """Envoie un e-mail via un serveur SMTP configuré dans les secrets GitHub."""
-    host = os.getenv("SMTP_HOST")
-    user = os.getenv("SMTP_USERNAME")
-    password = os.getenv("SMTP_PASSWORD")
-    sender = os.getenv("EMAIL_FROM")
-    recipients = [x.strip() for x in os.getenv("EMAIL_TO", "").split(",") if x.strip()]
-    if not all((host, user, password, sender)) or not recipients:
-        log.warning("E-mail non configuré.")
-        return False
-    port = int(os.getenv("SMTP_PORT", "587"))
-    email = EmailMessage()
-    email["Subject"] = "Dune 3 : séance détectée à Pathé Odysseum"
-    email["From"] = sender
-    email["To"] = ", ".join(recipients)
-    email.set_content(message)
-    try:
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=20) as client:
-                client.login(user, password)
-                client.send_message(email)
-        else:
-            with smtplib.SMTP(host, port, timeout=20) as client:
-                client.starttls()
-                client.login(user, password)
-                client.send_message(email)
-        return True
-    except Exception as exc:
-        log.error("Envoi e-mail impossible : %s", exc)
-        return False
-
-
 def notify_all(message: str, log: logging.Logger) -> None:
-    """Utilise tous les canaux configurés ; l'échec de l'un n'empêche pas les autres."""
+    """Alerte Telegram et ntfy ; l'échec de l'un n'empêche pas l'autre."""
     results = {
         "Telegram": notify_telegram(message, log),
         "ntfy": notify_ntfy(message, log),
-        "e-mail": notify_email(message, log),
     }
-    log.info("Canaux notifiés : %s", ", ".join(name for name, sent in results.items() if sent) or "aucun")
-
-
-def listed_dune_sessions(page, date_label: str) -> list[Session]:
-    """Extrait toute séance Dune affichée, quel que soit son format ou son état.
-
-    Une séance « COMPLET » est volontairement retenue : l'objectif est d'avoir
-    une preuve que la programmation du film existe, pas de trouver une place.
-    """
-    results: list[Session] = []
-    seen: set[str] = set()
-    cards = page.locator("article, [class*='movie'], [class*='film'], [class*='schedule']").all()
-    for card in cards:
-        try:
-            card_text = normalise(card.inner_text(timeout=3_000)).lower()
-        except Exception:
-            continue
-        if "dune" not in card_text or ("troisième partie" not in card_text and "troisieme partie" not in card_text):
-            continue
-        for button in card.locator("button").all():
-            try:
-                text = normalise(button.inner_text(timeout=2_000))
-                is_time = re.search(r"\b\d{1,2}[:h]\d{2}\b", text) is not None
-                is_booking = "réserver" in text.lower() or "reserver" in text.lower()
-                if not is_time and not is_booking:
-                    continue
-            except Exception:
-                continue
-            session = Session(date_label, text)
-            if session.key not in seen:
-                seen.add(session.key)
-                results.append(session)
-    return results
+    notified = [name for name, sent in results.items() if sent]
+    log.info("Canaux notifiés : %s", ", ".join(notified) or "aucun")
 
 
 def pathé_date_label(day: date) -> str:
@@ -194,36 +185,176 @@ def pathé_date_label(day: date) -> str:
     return f"{WEEKDAYS_FR[day.weekday()]} {day.day} {MONTHS_FR[day.month - 1]}"
 
 
-def select_day(page, day: date) -> None:
-    """Sélectionne un jour visible ; sinon l'absence est un résultat inconnu.
+def create_stealth_context(browser):
+    """Crée un contexte de navigation avec évasion anti-bot."""
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/133.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1920, "height": 1080},
+        locale="fr-FR",
+        timezone_id="Europe/Paris",
+        extra_http_headers={
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,image/apng,*/*;q=0.8"
+            ),
+            "sec-ch-ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+        },
+    )
+    context.add_init_script(STEALTH_INIT_SCRIPT)
+    return context
 
-    On ne confond volontairement pas « ce jour n'est pas proposé par le site »
-    et « aucune séance ce jour-là ». Les deux auraient des conséquences très
-    différentes pour l'alerte.
-    """
+
+def dismiss_overlays(page) -> None:
+    """Ferme les bannières de cookies ou fenêtres contextuelles si présentes."""
+    for selector in [
+        "#onetrust-accept-btn-handler",
+        "button:has-text('Tout accepter')",
+        "button:has-text('Continuer sans accepter')",
+        "button:has-text('Accepter')",
+    ]:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1_500):
+                btn.click(timeout=1_500)
+                page.wait_for_timeout(500)
+                break
+        except Exception:
+            continue
+
+
+def listed_dune_sessions(page, context_label: str) -> list[Session]:
+    """Extrait toute séance ou mention de Dune 3 affichée."""
+    results: list[Session] = []
+    seen: set[str] = set()
+
+    cards = page.locator(
+        "article, [class*='movie'], [class*='film'], [class*='schedule'], [class*='card']"
+    ).all()
+
+    for card in cards:
+        try:
+            card_text = normalise(card.inner_text(timeout=2_000))
+        except Exception:
+            continue
+
+        if not is_dune_3(card_text):
+            continue
+
+        found_button = False
+        buttons = card.locator("button, a[href*='reservation'], a[href*='booking']").all()
+        for button in buttons:
+            try:
+                text = normalise(button.inner_text(timeout=1_000))
+                is_time = re.search(r"\b\d{1,2}[:h]\d{2}\b", text) is not None
+                is_booking = "réserver" in text.lower() or "reserver" in text.lower()
+                if is_time or is_booking:
+                    session = Session(context_label, f"Séance : {text} ({card_text[:80]}...)")
+                    if session.key not in seen:
+                        seen.add(session.key)
+                        results.append(session)
+                        found_button = True
+            except Exception:
+                continue
+
+        if not found_button:
+            session = Session(context_label, f"Film référencé : {card_text[:120]}")
+            if session.key not in seen:
+                seen.add(session.key)
+                results.append(session)
+
+    if not results:
+        try:
+            body_text = normalise(page.locator("body").inner_text(timeout=3_000))
+            if is_dune_3(body_text):
+                session = Session(context_label, "Mention de Dune 3 détectée sur la page")
+                if session.key not in seen:
+                    seen.add(session.key)
+                    results.append(session)
+        except Exception:
+            pass
+
+    return results
+
+
+def select_day_if_available(page, day: date, log: logging.Logger) -> bool:
+    """Tente de sélectionner un jour dans le carrousel si disponible (non bloquant)."""
     label = pathé_date_label(day)
-    choices = page.get_by_text(label, exact=True)
-    if choices.count() == 0:
-        raise RuntimeError(f"Le {label} n'est pas encore sélectionnable sur la page Pathé.")
-    choices.first.click(timeout=10_000)
-    page.wait_for_timeout(900)
-
-
-def check_imax_event_page(browser) -> list[Session]:
-    """Vérifie aussi la page spécifique de l'avant-première IMAX 70 mm.
-
-    Cette page peut ouvrir la vente avant que la programmation générale du
-    cinéma soit complète ; elle est donc une seconde source, contrôlée à chaque
-    passage dès maintenant.
-    """
-    page = browser.new_page(locale="fr-FR", viewport={"width": 1440, "height": 1200})
     try:
-        page.goto(IMAX_EVENT_URL, wait_until="domcontentloaded", timeout=45_000)
+        choices = page.get_by_text(label, exact=True)
+        if choices.count() == 0:
+            log.info("Date %s non présente dans le carrousel (réservation lointaine).", label)
+            return False
+        choices.first.click(timeout=5_000)
+        page.wait_for_timeout(1_000)
+        return True
+    except Exception as exc:
+        log.debug("Impossible de cliquer sur %s : %s", label, exc)
+        return False
+
+
+def check_imax_event_page(context, log: logging.Logger) -> list[Session]:
+    """Vérifie la page dédiée à l'événement / projection IMAX si elle existe."""
+    page = context.new_page()
+    try:
+        try:
+            response = page.goto(IMAX_EVENT_URL, wait_until="domcontentloaded", timeout=30_000)
+            if response and response.status >= 400:
+                log.info("Page événement IMAX non accessible (HTTP %s).", response.status)
+                return []
+        except Exception as exc:
+            log.info("Page événement IMAX non joignable pour le moment : %s", exc)
+            return []
+
+        dismiss_overlays(page)
+        page.wait_for_timeout(2_000)
+        body = normalise(page.locator("body").inner_text(timeout=10_000))
+        if not is_dune_3(body):
+            log.info("Page IMAX chargée mais Dune 3 n'y figure pas encore.")
+            return []
+        return listed_dune_sessions(page, "Page IMAX dédiée")
+    finally:
+        page.close()
+
+
+def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> list[Session]:
+    """Vérifie la programmation sur la page du cinéma Pathé Odysseum."""
+    page = context.new_page()
+    try:
+        response = page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=45_000)
+        if response and response.status >= 400:
+            raise RuntimeError(f"Échec de chargement de la page cinéma (HTTP {response.status})")
+
+        dismiss_overlays(page)
         page.wait_for_timeout(2_500)
-        body = normalise(page.locator("body").inner_text(timeout=15_000)).lower()
-        if "dune" not in body or "troisième partie" not in body:
-            raise RuntimeError("La page IMAX Dune attendue ne s'est pas chargée.")
-        return listed_dune_sessions(page, "page IMAX 70 mm dédiée")
+
+        body = normalise(page.locator("body").inner_text(timeout=15_000))
+        if "Pathé" not in body and "Odysseum" not in body:
+            raise RuntimeError("La page Pathé Odysseum ne s'est pas affichée correctement.")
+
+        sessions: list[Session] = []
+
+        # 1. Vérification générale sur la page (films à l'affiche et annonces)
+        sessions.extend(listed_dune_sessions(page, "Pathé Odysseum (Général)"))
+
+        # 2. Vérification des dates cibles si affichées dans le carrousel
+        for offset in range(days):
+            day = start + timedelta(days=offset)
+            if select_day_if_available(page, day, log):
+                sessions.extend(listed_dune_sessions(page, pathé_date_label(day)))
+
+        return sessions
     finally:
         page.close()
 
@@ -231,39 +362,42 @@ def check_imax_event_page(browser) -> list[Session]:
 def check(start: date, days: int, data_dir: Path) -> int:
     state_file = data_dir / "dune_pathe_state.json"
     log = setup_logging(data_dir / "dune_pathe_monitor.log")
-    log.info("Période surveillée : %s au %s", start, start + timedelta(days=days - 1))
+    log.info("Vérification quotidienne Dune 3 — Pathé Odysseum (période cible : %s sur %s jours)", start, days)
+
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-infobars",
+                ],
+            )
             try:
-                sessions = []
+                context = create_stealth_context(browser)
+                sessions: list[Session] = []
                 sources_ok = 0
-                # La page IMAX est tentée séparément : elle reste utile même si
-                # Pathé ne laisse pas encore choisir les dates 16–22 au cinéma.
+
+                # 1. Source événement IMAX
                 try:
-                    sessions.extend(check_imax_event_page(browser))
+                    imax_sessions = check_imax_event_page(context, log)
+                    sessions.extend(imax_sessions)
                     sources_ok += 1
                 except Exception as exc:
-                    log.warning("Page IMAX non vérifiable : %s", exc)
+                    log.warning("Erreur vérification page IMAX : %s", exc)
+
+                # 2. Source cinéma Pathé Odysseum
                 try:
-                    page = browser.new_page(locale="fr-FR", viewport={"width": 1440, "height": 1200})
-                    try:
-                        page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=45_000)
-                        page.wait_for_timeout(2_500)
-                        body = normalise(page.locator("body").inner_text(timeout=15_000))
-                        if "Pathé Odysseum" not in body:
-                            raise RuntimeError("La page Pathé attendue ne s'est pas chargée.")
-                        for offset in range(days):
-                            day = start + timedelta(days=offset)
-                            select_day(page, day)
-                            sessions.extend(listed_dune_sessions(page, pathé_date_label(day)))
-                        sources_ok += 1
-                    finally:
-                        page.close()
+                    cinema_sessions = check_cinema_page(context, start, days, log)
+                    sessions.extend(cinema_sessions)
+                    sources_ok += 1
                 except Exception as exc:
-                    log.warning("Page cinéma non vérifiable : %s", exc)
+                    log.error("Erreur vérification page cinéma : %s", exc)
+
                 if sources_ok == 0:
-                    raise RuntimeError("Aucune des deux pages Pathé n'a pu être vérifiée.")
+                    raise RuntimeError("Aucune des sources Pathé n'a pu être vérifiée.")
             finally:
                 browser.close()
     except (PlaywrightTimeoutError, RuntimeError) as exc:
@@ -273,20 +407,31 @@ def check(start: date, days: int, data_dir: Path) -> int:
         log.error("Vérification impossible — état non modifié : %s", exc)
         return 2
 
+    # Dédoublonnage
+    unique_sessions: list[Session] = []
+    seen_keys: set[str] = set()
+    for s in sessions:
+        if s.key not in seen_keys:
+            seen_keys.add(s.key)
+            unique_sessions.append(s)
+
     old_keys = set(load_state(state_file).get("active_session_keys", []))
-    fresh = [s for s in sessions if s.key not in old_keys]
+    fresh = [s for s in unique_sessions if s.key not in old_keys]
+
     if fresh:
-        message = "Dune 3 : nouvelle(s) séance(s) repérée(s) à Odysseum :\n"
-        message += "\n".join(f"• {s.text}" for s in fresh) + f"\n{CINEMA_URL}"
+        message = (
+            "🚨 Dune 3 : séance(s) / prévente(s) repérée(s) au Pathé Odysseum !\n\n"
+        )
+        message += "\n".join(f"• [{s.date_label}] {s.text}" for s in fresh)
+        message += f"\n\nLien de réservation :\n{CINEMA_URL}"
         log.warning(message)
         notify_all(message, log)
-    elif sessions:
-        log.info("Séance(s) Dune déjà connue(s) : pas de doublon.")
+    elif unique_sessions:
+        log.info("Séance(s) Dune déjà connue(s) (%d séance(s)) : pas de doublon.", len(unique_sessions))
     else:
-        log.info("Aucune séance Dune affichée à cette vérification.")
-    # À la différence du script Gemini, chaque passage recharge la page. Une
-    # séance disparue puis remise en vente est à nouveau signalée.
-    save_state(state_file, sessions)
+        log.info("Aucune séance ni trace de Dune 3 affichée à cette vérification.")
+
+    save_state(state_file, unique_sessions)
     return 0
 
 
