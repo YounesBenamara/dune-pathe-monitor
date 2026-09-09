@@ -243,8 +243,18 @@ def dismiss_overlays(page) -> None:
             continue
 
 
+def is_valid_showtime(text: str) -> bool:
+    """Vérifie si le texte contient une heure de séance (ex: 14h30, 20:15) en évitant les durées de film (ex: 2h25)."""
+    match = re.search(r"\b(0?[0-9]|1[0-9]|2[0-3])[:h]([0-5][0-9])\b", text)
+    if not match:
+        return False
+    hour = int(match.group(1))
+    # Horaires réalistes de séances de cinéma (09h00 à 23h59 ou séances tardives 00h-01h)
+    return 9 <= hour <= 23 or hour <= 1
+
+
 def listed_dune_sessions(page, context_label: str) -> list[Session]:
-    """Extrait uniquement les vraies séances réservables ou avec horaire pour Dune 3."""
+    """Extrait les séances pour Dune 3 : réservables, avec horaire, ou indiquées COMPLET."""
     results: list[Session] = []
     seen: set[str] = set()
 
@@ -261,15 +271,32 @@ def listed_dune_sessions(page, context_label: str) -> list[Session]:
         if not is_dune_3(card_text):
             continue
 
-        # Recherche de boutons d'horaires (ex: 14h30, 20:15) ou de réservation active
-        buttons = card.locator("button, a[href*='reservation'], a[href*='booking'], a[href*='billet']").all()
-        for button in buttons:
+        # Recherche de créneaux de séances : boutons, liens de résa, badges complet
+        elements = card.locator(
+            "button, a[href*='reservation'], a[href*='booking'], a[href*='billet'], "
+            "[class*='session'], [class*='showtime'], [class*='slot'], [class*='complet']"
+        ).all()
+
+        for el in elements:
             try:
-                text = normalise(button.inner_text(timeout=1_000))
-                is_time = re.search(r"\b\d{1,2}[:h]\d{2}\b", text) is not None
-                is_booking = any(w in text.lower() for w in ["réserver", "reserver", "billet", "acheter", "séance", "seance"])
-                if is_time or is_booking:
-                    session = Session(context_label, f"Séance réservable : {text} ({card_text[:70]}...)")
+                text = normalise(el.inner_text(timeout=1_000))
+                if not text:
+                    continue
+                t_lower = text.lower()
+                is_time = is_valid_showtime(text)
+                is_booking = any(w in t_lower for w in ["réserver", "reserver", "billet", "acheter"])
+                is_complet = "complet" in t_lower
+
+                # On retient la séance si elle a un vrai horaire, un bouton de réservation ou si elle est COMPLET
+                if is_time or is_booking or is_complet:
+                    if is_complet:
+                        desc = f"Séance (COMPLET) : {text}"
+                    elif is_booking:
+                        desc = f"Séance réservable : {text}"
+                    else:
+                        desc = f"Séance programmée : {text}"
+
+                    session = Session(context_label, f"{desc} ({card_text[:60]}...)")
                     if session.key not in seen:
                         seen.add(session.key)
                         results.append(session)
