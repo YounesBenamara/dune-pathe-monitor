@@ -23,7 +23,8 @@ from playwright.sync_api import sync_playwright
 CINEMA_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum"
 IMAX_EVENT_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289"
 PARIS = ZoneInfo("Europe/Paris")
-DEFAULT_START = date(2026, 12, 16)
+DEFAULT_START = date(2026, 12, 15)
+DEFAULT_DAYS = 8
 WEEKDAYS_FR = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
 MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.")
 
@@ -243,7 +244,7 @@ def dismiss_overlays(page) -> None:
 
 
 def listed_dune_sessions(page, context_label: str) -> list[Session]:
-    """Extrait toute séance ou mention de Dune 3 affichée."""
+    """Extrait uniquement les vraies séances réservables ou avec horaire pour Dune 3."""
     results: list[Session] = []
     seen: set[str] = set()
 
@@ -260,38 +261,20 @@ def listed_dune_sessions(page, context_label: str) -> list[Session]:
         if not is_dune_3(card_text):
             continue
 
-        found_button = False
-        buttons = card.locator("button, a[href*='reservation'], a[href*='booking']").all()
+        # Recherche de boutons d'horaires (ex: 14h30, 20:15) ou de réservation active
+        buttons = card.locator("button, a[href*='reservation'], a[href*='booking'], a[href*='billet']").all()
         for button in buttons:
             try:
                 text = normalise(button.inner_text(timeout=1_000))
                 is_time = re.search(r"\b\d{1,2}[:h]\d{2}\b", text) is not None
-                is_booking = "réserver" in text.lower() or "reserver" in text.lower()
+                is_booking = any(w in text.lower() for w in ["réserver", "reserver", "billet", "acheter", "séance", "seance"])
                 if is_time or is_booking:
-                    session = Session(context_label, f"Séance : {text} ({card_text[:80]}...)")
+                    session = Session(context_label, f"Séance réservable : {text} ({card_text[:70]}...)")
                     if session.key not in seen:
                         seen.add(session.key)
                         results.append(session)
-                        found_button = True
             except Exception:
                 continue
-
-        if not found_button:
-            session = Session(context_label, f"Film référencé : {card_text[:120]}")
-            if session.key not in seen:
-                seen.add(session.key)
-                results.append(session)
-
-    if not results:
-        try:
-            body_text = normalise(page.locator("body").inner_text(timeout=3_000))
-            if is_dune_3(body_text):
-                session = Session(context_label, "Mention de Dune 3 détectée sur la page")
-                if session.key not in seen:
-                    seen.add(session.key)
-                    results.append(session)
-        except Exception:
-            pass
 
     return results
 
@@ -361,8 +344,9 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
         page.wait_for_timeout(2_500)
 
         body = normalise(page.locator("body").inner_text(timeout=15_000))
-        if "Pathé" not in body and "Odysseum" not in body:
-            raise RuntimeError("La page Pathé Odysseum ne s'est pas affichée correctement.")
+        title = page.title()
+        if not any(k in body.lower() or k in title.lower() for k in ["pathé", "pathe", "odysseum"]):
+            raise RuntimeError(f"La page Pathé Odysseum ne s'est pas affichée correctement (titre: {title}).")
 
         sessions: list[Session] = []
 
@@ -465,7 +449,7 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
 def main() -> int:
     parser = argparse.ArgumentParser(description="Moniteur Dune 3 / Odysseum")
     parser.add_argument("--start-date", type=date.fromisoformat, default=DEFAULT_START)
-    parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).parent)
     parser.add_argument("--force-notify", action="store_true", help="Force l'envoi d'une notification de test")
     args = parser.parse_args()
