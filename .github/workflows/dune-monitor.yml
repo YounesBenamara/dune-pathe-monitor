@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: state
-          key: dune-pathe-state-${{ github.run_id }}
+          key: dune-pathe-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: dune-pathe-state-
 
       - name: Vérifier Pathé et alerter (Telegram / ntfy)
@@ -53,5 +53,5 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: state
-          key: dune-pathe-state-${{ github.run_id }}
+          key: dune-pathe-state-${{ github.run_id }}-${{ github.run_attempt }}
 
