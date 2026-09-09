@@ -30,10 +30,21 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Installer le navigateur
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Installer les dépendances
         run: |
           python -m pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+            python -m playwright install --with-deps chromium
+          else
+            python -m playwright install-deps chromium || true
+          fi
 
       # Le cache persiste les séances déjà vues entre deux serveurs temporaires.
       - name: Restaurer l'état précédent

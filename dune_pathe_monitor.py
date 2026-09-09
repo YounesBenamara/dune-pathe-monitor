@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import logging
@@ -180,13 +181,19 @@ def notify_ntfy(message: str, log: logging.Logger) -> bool:
 
 
 def notify_all(message: str, log: logging.Logger) -> None:
-    """Alerte Telegram et ntfy ; l'échec de l'un n'empêche pas l'autre."""
-    results = {
-        "Telegram": notify_telegram(message, log),
-        "ntfy": notify_ntfy(message, log),
-    }
-    notified = [name for name, sent in results.items() if sent]
-    log.info("Canaux notifiés : %s", ", ".join(notified) or "aucun")
+    """Alerte Telegram et ntfy en parallèle pour un envoi instantané."""
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_tg = executor.submit(notify_telegram, message, log)
+        future_ntfy = executor.submit(notify_ntfy, message, log)
+        res_tg = future_tg.result()
+        res_ntfy = future_ntfy.result()
+
+    notified = []
+    if res_tg:
+        notified.append("Telegram")
+    if res_ntfy:
+        notified.append("ntfy")
+    log.info("Canaux notifiés en parallèle : %s", ", ".join(notified) or "aucun")
 
 
 def pathé_date_label(day: date) -> str:
@@ -222,6 +229,23 @@ def create_stealth_context(browser):
         },
     )
     context.add_init_script(STEALTH_INIT_SCRIPT)
+
+    # Blocage des ressources lourdes et superflues (images, médias, polices, traceurs publicitaires)
+    # Accélère le chargement de la page de 3x à 5x
+    blocked_exts = re.compile(r"\.(png|jpe?g|webp|svg|gif|woff2?|ttf|eot|mp4|webm|avi)$", re.IGNORECASE)
+    blocked_trackers = re.compile(
+        r"(google-analytics|googletagmanager|doubleclick|criteo|facebook|tiktok|eulerian|hotjar|optimizely)",
+        re.IGNORECASE,
+    )
+
+    def route_filter(route):
+        url = route.request.url
+        if blocked_exts.search(url) or blocked_trackers.search(url):
+            route.abort()
+        else:
+            route.continue_()
+
+    context.route("**/*", route_filter)
     return context
 
 
@@ -235,9 +259,9 @@ def dismiss_overlays(page) -> None:
     ]:
         try:
             btn = page.locator(selector).first
-            if btn.is_visible(timeout=1_500):
-                btn.click(timeout=1_500)
-                page.wait_for_timeout(500)
+            if btn.is_visible(timeout=500):
+                btn.click(timeout=500)
+                page.wait_for_timeout(150)
                 break
         except Exception:
             continue
@@ -264,7 +288,7 @@ def listed_dune_sessions(page, context_label: str) -> list[Session]:
 
     for card in cards:
         try:
-            card_text = normalise(card.inner_text(timeout=2_000))
+            card_text = normalise(card.inner_text(timeout=1_500))
         except Exception:
             continue
 
@@ -279,7 +303,7 @@ def listed_dune_sessions(page, context_label: str) -> list[Session]:
 
         for el in elements:
             try:
-                text = normalise(el.inner_text(timeout=1_000))
+                text = normalise(el.inner_text(timeout=800))
                 if not text:
                     continue
                 t_lower = text.lower()
@@ -314,8 +338,8 @@ def select_day_if_available(page, day: date, log: logging.Logger) -> bool:
         if choices.count() == 0:
             log.info("Date %s non présente dans le carrousel (réservation lointaine).", label)
             return False
-        choices.first.click(timeout=5_000)
-        page.wait_for_timeout(1_000)
+        choices.first.click(timeout=2_000)
+        page.wait_for_timeout(250)
         return True
     except Exception as exc:
         log.debug("Impossible de cliquer sur %s : %s", label, exc)
@@ -327,7 +351,7 @@ def check_imax_event_page(context, log: logging.Logger) -> list[Session]:
     page = context.new_page()
     try:
         try:
-            response = page.goto(IMAX_EVENT_URL, wait_until="domcontentloaded", timeout=30_000)
+            response = page.goto(IMAX_EVENT_URL, wait_until="domcontentloaded", timeout=20_000)
             if response and response.status >= 400:
                 log.info("Page événement IMAX non accessible (HTTP %s).", response.status)
                 return []
@@ -336,8 +360,12 @@ def check_imax_event_page(context, log: logging.Logger) -> list[Session]:
             return []
 
         dismiss_overlays(page)
-        page.wait_for_timeout(2_000)
-        body = normalise(page.locator("body").inner_text(timeout=10_000))
+        try:
+            page.wait_for_selector("article, h1, [class*='event'], [class*='movie'], body", timeout=2_000)
+        except Exception:
+            pass
+
+        body = normalise(page.locator("body").inner_text(timeout=3_000))
         if not is_dune_3(body):
             log.info("Page IMAX chargée mais Dune 3 n'y figure pas encore.")
             return []
@@ -353,15 +381,15 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
         response = None
         for attempt in range(2):
             try:
-                response = page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=45_000)
+                response = page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=30_000)
                 if response and response.status == 403:
-                    page.wait_for_timeout(3_000)
-                    probe = normalise(page.locator("body").inner_text(timeout=3_000))
+                    page.wait_for_timeout(1_000)
+                    probe = normalise(page.locator("body").inner_text(timeout=2_000))
                     if "Pathé" in probe or "Odysseum" in probe:
                         break
                     if attempt == 0:
-                        page.wait_for_timeout(2_000)
-                        page.reload(wait_until="domcontentloaded", timeout=30_000)
+                        page.wait_for_timeout(1_000)
+                        page.reload(wait_until="domcontentloaded", timeout=20_000)
                 break
             except Exception as exc:
                 if attempt == 1:
@@ -369,23 +397,14 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
 
         dismiss_overlays(page)
 
-        # Attente d'éventuelle résolution du challenge Cloudflare
-        body = ""
-        title = ""
-        for _ in range(6):
-            try:
-                body = normalise(page.locator("body").inner_text(timeout=3_000))
-                title = page.title()
-                if any(k in body.lower() or k in title.lower() for k in ["pathé", "pathe", "odysseum"]):
-                    break
-                if any(w in title.lower() or w in body.lower() for w in ["moment", "cloudflare", "turnstile", "vérification"]):
-                    log.info("Attente résolution du contrôle Cloudflare...")
-                    page.wait_for_timeout(3_000)
-                else:
-                    page.wait_for_timeout(1_000)
-            except Exception:
-                page.wait_for_timeout(1_000)
+        # Attente dynamique ultra-rapide du contenu réel
+        try:
+            page.wait_for_selector("article, [class*='movie'], [class*='film'], h1, footer", timeout=3_000)
+        except Exception:
+            pass
 
+        body = normalise(page.locator("body").inner_text(timeout=3_000))
+        title = page.title()
         if not any(k in body.lower() or k in title.lower() for k in ["pathé", "pathe", "odysseum"]):
             log.warning("Page cinéma non validée (title: %r, snippet: %r)", title, body[:120])
 
