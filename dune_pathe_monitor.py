@@ -120,15 +120,16 @@ def save_state(path: Path, sessions: list[Session]) -> None:
 
 
 def notify_telegram(message: str, log: logging.Logger) -> bool:
-    token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not token or not chat_id:
         log.warning("Telegram non configuré (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant).")
         return False
-    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
-    request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage", data=payload, method="POST"
-    )
     try:
+        payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage", data=payload, method="POST"
+        )
         with urllib.request.urlopen(request, timeout=20) as response:
             if response.status != 200:
                 log.error("Telegram a répondu avec le statut %s", response.status)
@@ -141,25 +142,32 @@ def notify_telegram(message: str, log: logging.Logger) -> bool:
 
 def notify_ntfy(message: str, log: logging.Logger) -> bool:
     """Envoie une notification push ntfy vers un topic public ou protégé."""
-    topic = os.getenv("NTFY_TOPIC")
+    topic = (os.getenv("NTFY_TOPIC") or "").strip()
     if not topic:
         log.warning("ntfy non configuré (NTFY_TOPIC manquant).")
         return False
-    server = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+
+    server = (os.getenv("NTFY_SERVER") or "").strip().rstrip("/") or "https://ntfy.sh"
+    if not server.startswith(("http://", "https://")):
+        server = f"https://{server}"
+
     headers = {
         "Title": "Dune 3 — Pathé Odysseum",
         "Priority": "urgent",
         "Tags": "movie_camera,ticket",
     }
-    if token := os.getenv("NTFY_TOKEN"):
+    token = (os.getenv("NTFY_TOKEN") or "").strip()
+    if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        f"{server}/{topic}",
-        data=message.encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
+
+    url = f"{server}/{topic}"
     try:
+        request = urllib.request.Request(
+            url,
+            data=message.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=20) as response:
             if 200 <= response.status < 300:
                 return True

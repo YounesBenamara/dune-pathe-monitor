@@ -44,7 +44,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
-          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
         run: |
           mkdir -p state
           python dune_pathe_monitor.py --data-dir state
