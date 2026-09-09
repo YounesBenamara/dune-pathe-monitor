@@ -142,7 +142,19 @@ def notify_telegram(message: str, log: logging.Logger) -> bool:
         return False
 
 
-def notify_ntfy(message: str, log: logging.Logger) -> bool:
+def safe_ascii_header(text: str) -> str:
+    """Garantit qu'un en-tête HTTP est encodable en latin-1/ASCII strict."""
+    clean = text.replace("—", "-").replace("–", "-")
+    return clean.encode("latin-1", "replace").decode("latin-1")
+
+
+def notify_ntfy(
+    message: str,
+    log: logging.Logger,
+    title: str = "Dune 3 - Pathe Odysseum",
+    tags: str = "movie_camera,ticket",
+    priority: str = "urgent",
+) -> bool:
     """Envoie une notification push ntfy vers un topic public ou protégé."""
     topic = (os.getenv("NTFY_TOPIC") or "").strip()
     if not topic:
@@ -154,9 +166,9 @@ def notify_ntfy(message: str, log: logging.Logger) -> bool:
         server = f"https://{server}"
 
     headers = {
-        "Title": "Dune 3 - Pathe Odysseum",
-        "Priority": "urgent",
-        "Tags": "movie_camera,ticket",
+        "Title": safe_ascii_header(title),
+        "Priority": priority,
+        "Tags": tags,
     }
     token = (os.getenv("NTFY_TOKEN") or "").strip()
     if token:
@@ -180,11 +192,17 @@ def notify_ntfy(message: str, log: logging.Logger) -> bool:
         return False
 
 
-def notify_all(message: str, log: logging.Logger) -> None:
+def notify_all(
+    message: str,
+    log: logging.Logger,
+    title: str = "Dune 3 - Pathe Odysseum",
+    tags: str = "movie_camera,ticket",
+    priority: str = "urgent",
+) -> None:
     """Alerte Telegram et ntfy en parallèle pour un envoi instantané."""
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_tg = executor.submit(notify_telegram, message, log)
-        future_ntfy = executor.submit(notify_ntfy, message, log)
+        future_ntfy = executor.submit(notify_ntfy, message, log, title, tags, priority)
         res_tg = future_tg.result()
         res_ntfy = future_ntfy.result()
 
@@ -470,11 +488,29 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
                     raise RuntimeError("Aucune des sources Pathé n'a pu être vérifiée.")
             finally:
                 browser.close()
-    except (PlaywrightTimeoutError, RuntimeError) as exc:
-        log.error("Résultat inconnu — état non modifié : %s", exc)
-        return 2
-    except Exception as exc:
+    except (PlaywrightTimeoutError, RuntimeError, Exception) as exc:
         log.error("Vérification impossible — état non modifié : %s", exc)
+        try:
+            state = load_state(state_file)
+            if not state.get("in_error"):
+                err_msg = (
+                    "⚠️ Alerte Moniteur Dune 3 : Problème d'accès au site Pathé Odysseum\n\n"
+                    f"Détail : {exc}\n\n"
+                    "Le site Pathé ou sa protection anti-bot bloque la connexion ou est temporairement inaccessible. "
+                    "Une nouvelle tentative aura lieu au prochain créneau programmé."
+                )
+                notify_all(
+                    err_msg,
+                    log,
+                    title="Alerte : Acces Pathe bloque",
+                    tags="warning,shield",
+                    priority="high",
+                )
+                state["in_error"] = True
+                state["last_error"] = str(exc)
+                state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as notify_err:
+            log.error("Erreur lors de l'alerte d'échec : %s", notify_err)
         return 2
 
     # Dédoublonnage
@@ -485,23 +521,71 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
             seen_keys.add(s.key)
             unique_sessions.append(s)
 
-    old_keys = set(load_state(state_file).get("active_session_keys", []))
+    state = load_state(state_file)
+    if state.get("in_error"):
+        recover_msg = (
+            "✅ Moniteur Dune 3 : Accès au site Pathé Odysseum rétabli !\n\n"
+            "La vérification a pu s'effectuer normalement avec succès."
+        )
+        notify_all(
+            recover_msg,
+            log,
+            title="Acces Pathe retabli",
+            tags="white_check_mark",
+            priority="default",
+        )
+        state["in_error"] = False
+        state["last_error"] = None
+
+    old_keys = set(state.get("active_session_keys", []))
     fresh = [s for s in unique_sessions if s.key not in old_keys]
 
-    if force_notify and not fresh:
-        if unique_sessions:
-            fresh = unique_sessions
+    if force_notify:
+        if fresh or unique_sessions:
+            active_list = fresh or unique_sessions
+            message = (
+                "🚨 Dune 3 : séance(s) / prévente(s) repérée(s) au Pathé Odysseum !\n\n"
+            )
+            message += "\n".join(f"• [{s.date_label}] {s.text}" for s in active_list)
+            message += f"\n\nLien de réservation :\n{CINEMA_URL}"
+            log.warning(message)
+            notify_all(
+                message,
+                log,
+                title="ALERTE Dune 3 - Seance disponible !",
+                tags="rotating_light,ticket",
+                priority="urgent",
+            )
         else:
-            fresh = [Session("Test manuel", "Notification de test : votre moniteur Telegram et ntfy fonctionne parfaitement !")]
-
-    if fresh:
+            test_message = (
+                "🧪 [TEST MANUEL] Moniteur Dune 3 — Pathé Odysseum\n\n"
+                "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
+                "ℹ️ Aucune séance n'est ouverte pour le moment (zéro faux positif).\n"
+                "La surveillance automatique est active selon le planning programmé.\n\n"
+                f"Lien du cinéma :\n{CINEMA_URL}"
+            )
+            log.info("Envoi de la notification de test manuel (sans fausse alerte).")
+            notify_all(
+                test_message,
+                log,
+                title="[TEST] Moniteur Dune 3 - Pathe Odysseum",
+                tags="test_tube,white_check_mark",
+                priority="default",
+            )
+    elif fresh:
         message = (
             "🚨 Dune 3 : séance(s) / prévente(s) repérée(s) au Pathé Odysseum !\n\n"
         )
         message += "\n".join(f"• [{s.date_label}] {s.text}" for s in fresh)
         message += f"\n\nLien de réservation :\n{CINEMA_URL}"
         log.warning(message)
-        notify_all(message, log)
+        notify_all(
+            message,
+            log,
+            title="ALERTE Dune 3 - Seance disponible !",
+            tags="rotating_light,ticket",
+            priority="urgent",
+        )
     elif unique_sessions:
         log.info("Séance(s) Dune déjà connue(s) (%d séance(s)) : pas de doublon.", len(unique_sessions))
     else:

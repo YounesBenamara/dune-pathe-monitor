@@ -2,9 +2,10 @@ name: Surveiller Dune 3 — Pathé Odysseum
 
 on:
   schedule:
-    # Une fois par jour à 07:15 UTC (09:15 heure de Paris en été, 08:15 en hiver).
-    # Préserve le quota gratuit de 2 000 min/mois de GitHub Actions (~30 min/mois consommées).
-    - cron: "15 7 * * *"
+    # Toutes les 15 minutes entre 08h00 et 10h00 (heure de Paris / 06:00-07:45 UTC)
+    - cron: "0,15,30,45 6,7 * * *"
+    # Une fois par heure de 10h00 jusqu'à 20h00 (heure de Paris / 08:00-18:00 UTC)
+    - cron: "0 8-18 * * *"
   workflow_dispatch:
     inputs:
       force_notify:
