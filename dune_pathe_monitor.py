@@ -23,6 +23,7 @@ from playwright.sync_api import sync_playwright
 
 CINEMA_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum"
 IMAX_EVENT_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289"
+DECEMBER_16_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum?date=2026-12-16"
 PARIS = ZoneInfo("Europe/Paris")
 DEFAULT_START = date(2026, 12, 16)
 DEFAULT_DAYS = 7
@@ -79,6 +80,7 @@ def is_dune_3(text: str) -> bool:
 class Session:
     date_label: str
     text: str
+    url: str = ""
 
     @property
     def key(self) -> str:
@@ -338,7 +340,19 @@ def listed_dune_sessions(page, context_label: str) -> list[Session]:
                     else:
                         desc = f"Séance programmée : {text}"
 
-                    session = Session(context_label, f"{desc} ({card_text[:60]}...)")
+                    href = ""
+                    try:
+                        href = el.get_attribute("href") or ""
+                        if not href:
+                            parent_a = el.locator("xpath=ancestor-or-self::a").first
+                            if parent_a.count() > 0:
+                                href = parent_a.get_attribute("href") or ""
+                        if href and not href.startswith("http"):
+                            href = urllib.parse.urljoin("https://www.pathe.fr", href)
+                    except Exception:
+                        href = ""
+
+                    session = Session(context_label, f"{desc} ({card_text[:60]}...)", url=href)
                     if session.key not in seen:
                         seen.add(session.key)
                         results.append(session)
@@ -546,8 +560,17 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
             message = (
                 "🚨 Dune 3 : séance(s) / prévente(s) repérée(s) au Pathé Odysseum !\n\n"
             )
-            message += "\n".join(f"• [{s.date_label}] {s.text}" for s in active_list)
-            message += f"\n\nLien de réservation :\n{CINEMA_URL}"
+            lines = []
+            for s in active_list:
+                item = f"• [{s.date_label}] {s.text}"
+                if s.url:
+                    item += f"\n  🔗 Réserver : {s.url}"
+                lines.append(item)
+            message += "\n".join(lines)
+            message += (
+                f"\n\n📅 Lien direct séances du 16 décembre :\n{DECEMBER_16_URL}\n\n"
+                f"🎟️ Lien direct événement IMAX 70mm :\n{IMAX_EVENT_URL}"
+            )
             log.warning(message)
             notify_all(
                 message,
@@ -562,7 +585,9 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
                 "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
                 "ℹ️ Aucune séance n'est ouverte pour le moment (zéro faux positif).\n"
                 "La surveillance automatique est active selon le planning programmé.\n\n"
-                f"Lien du cinéma :\n{CINEMA_URL}"
+                "🔗 Liens d'accès direct :\n"
+                f"📅 Séances du 16 décembre :\n{DECEMBER_16_URL}\n\n"
+                f"🎟️ Avant-première IMAX 70mm :\n{IMAX_EVENT_URL}"
             )
             log.info("Envoi de la notification de test manuel (sans fausse alerte).")
             notify_all(
@@ -576,8 +601,17 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
         message = (
             "🚨 Dune 3 : séance(s) / prévente(s) repérée(s) au Pathé Odysseum !\n\n"
         )
-        message += "\n".join(f"• [{s.date_label}] {s.text}" for s in fresh)
-        message += f"\n\nLien de réservation :\n{CINEMA_URL}"
+        lines = []
+        for s in fresh:
+            item = f"• [{s.date_label}] {s.text}"
+            if s.url:
+                item += f"\n  🔗 Réserver : {s.url}"
+            lines.append(item)
+        message += "\n".join(lines)
+        message += (
+            f"\n\n📅 Lien direct séances du 16 décembre :\n{DECEMBER_16_URL}\n\n"
+            f"🎟️ Lien direct événement IMAX 70mm :\n{IMAX_EVENT_URL}"
+        )
         log.warning(message)
         notify_all(
             message,
