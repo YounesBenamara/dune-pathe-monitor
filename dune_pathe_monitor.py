@@ -152,7 +152,7 @@ def notify_ntfy(message: str, log: logging.Logger) -> bool:
         server = f"https://{server}"
 
     headers = {
-        "Title": "Dune 3 — Pathé Odysseum",
+        "Title": "Dune 3 - Pathe Odysseum",
         "Priority": "urgent",
         "Tags": "movie_camera,ticket",
     }
@@ -367,7 +367,7 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
         page.close()
 
 
-def check(start: date, days: int, data_dir: Path) -> int:
+def check(start: date, days: int, data_dir: Path, force_notify: bool = False) -> int:
     state_file = data_dir / "dune_pathe_state.json"
     log = setup_logging(data_dir / "dune_pathe_monitor.log")
     log.info("Vérification quotidienne Dune 3 — Pathé Odysseum (période cible : %s sur %s jours)", start, days)
@@ -426,6 +426,12 @@ def check(start: date, days: int, data_dir: Path) -> int:
     old_keys = set(load_state(state_file).get("active_session_keys", []))
     fresh = [s for s in unique_sessions if s.key not in old_keys]
 
+    if force_notify and not fresh:
+        if unique_sessions:
+            fresh = unique_sessions
+        else:
+            fresh = [Session("Test manuel", "Notification de test : votre moniteur Telegram et ntfy fonctionne parfaitement !")]
+
     if fresh:
         message = (
             "🚨 Dune 3 : séance(s) / prévente(s) repérée(s) au Pathé Odysseum !\n\n"
@@ -448,10 +454,11 @@ def main() -> int:
     parser.add_argument("--start-date", type=date.fromisoformat, default=DEFAULT_START)
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).parent)
+    parser.add_argument("--force-notify", action="store_true", help="Force l'envoi d'une notification de test")
     args = parser.parse_args()
     if args.days < 1:
         parser.error("--days doit être positif")
-    return check(args.start_date, args.days, args.data_dir)
+    return check(args.start_date, args.days, args.data_dir, args.force_notify)
 
 
 if __name__ == "__main__":
