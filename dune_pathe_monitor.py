@@ -340,9 +340,22 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
     """Vérifie la programmation sur la page du cinéma Pathé Odysseum."""
     page = context.new_page()
     try:
-        response = page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=45_000)
-        if response and response.status >= 400:
-            raise RuntimeError(f"Échec de chargement de la page cinéma (HTTP {response.status})")
+        response = None
+        for attempt in range(2):
+            try:
+                response = page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=45_000)
+                if response and response.status == 403:
+                    page.wait_for_timeout(3_000)
+                    probe = normalise(page.locator("body").inner_text(timeout=3_000))
+                    if "Pathé" in probe or "Odysseum" in probe:
+                        break
+                    if attempt == 0:
+                        page.wait_for_timeout(2_000)
+                        page.reload(wait_until="domcontentloaded", timeout=30_000)
+                break
+            except Exception as exc:
+                if attempt == 1:
+                    raise exc
 
         dismiss_overlays(page)
         page.wait_for_timeout(2_500)
