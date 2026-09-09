@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import smtplib
 import sys
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -74,11 +76,11 @@ def save_state(path: Path, sessions: list[Session]) -> None:
     )
 
 
-def notify_telegram(message: str, log: logging.Logger) -> None:
+def notify_telegram(message: str, log: logging.Logger) -> bool:
     token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         log.warning("Nouvelle disponibilité, mais Telegram n'est pas configuré.")
-        return
+        return False
     payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage", data=payload, method="POST"
@@ -87,8 +89,72 @@ def notify_telegram(message: str, log: logging.Logger) -> None:
         with urllib.request.urlopen(request, timeout=20) as response:
             if response.status != 200:
                 log.error("Telegram a répondu %s", response.status)
+                return False
+            return True
     except Exception as exc:
         log.error("Envoi Telegram impossible : %s", exc)
+        return False
+
+
+def notify_ntfy(message: str, log: logging.Logger) -> bool:
+    """Envoie une notification push ntfy ; le sujet reste un secret GitHub."""
+    topic = os.getenv("NTFY_TOPIC")
+    if not topic:
+        log.warning("ntfy n'est pas configuré.")
+        return False
+    server = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+    headers = {"Title": "Dune 3 — Pathé Odysseum", "Priority": "urgent", "Tags": "movie_camera"}
+    if token := os.getenv("NTFY_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(f"{server}/{topic}", data=message.encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return 200 <= response.status < 300
+    except Exception as exc:
+        log.error("Envoi ntfy impossible : %s", exc)
+        return False
+
+
+def notify_email(message: str, log: logging.Logger) -> bool:
+    """Envoie un e-mail via un serveur SMTP configuré dans les secrets GitHub."""
+    host = os.getenv("SMTP_HOST")
+    user = os.getenv("SMTP_USERNAME")
+    password = os.getenv("SMTP_PASSWORD")
+    sender = os.getenv("EMAIL_FROM")
+    recipients = [x.strip() for x in os.getenv("EMAIL_TO", "").split(",") if x.strip()]
+    if not all((host, user, password, sender)) or not recipients:
+        log.warning("E-mail non configuré.")
+        return False
+    port = int(os.getenv("SMTP_PORT", "587"))
+    email = EmailMessage()
+    email["Subject"] = "Dune 3 : séance détectée à Pathé Odysseum"
+    email["From"] = sender
+    email["To"] = ", ".join(recipients)
+    email.set_content(message)
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as client:
+                client.login(user, password)
+                client.send_message(email)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as client:
+                client.starttls()
+                client.login(user, password)
+                client.send_message(email)
+        return True
+    except Exception as exc:
+        log.error("Envoi e-mail impossible : %s", exc)
+        return False
+
+
+def notify_all(message: str, log: logging.Logger) -> None:
+    """Utilise tous les canaux configurés ; l'échec de l'un n'empêche pas les autres."""
+    results = {
+        "Telegram": notify_telegram(message, log),
+        "ntfy": notify_ntfy(message, log),
+        "e-mail": notify_email(message, log),
+    }
+    log.info("Canaux notifiés : %s", ", ".join(name for name, sent in results.items() if sent) or "aucun")
 
 
 def listed_dune_sessions(page, date_label: str) -> list[Session]:
@@ -213,7 +279,7 @@ def check(start: date, days: int, data_dir: Path) -> int:
         message = "Dune 3 : nouvelle(s) séance(s) repérée(s) à Odysseum :\n"
         message += "\n".join(f"• {s.text}" for s in fresh) + f"\n{CINEMA_URL}"
         log.warning(message)
-        notify_telegram(message, log)
+        notify_all(message, log)
     elif sessions:
         log.info("Séance(s) Dune déjà connue(s) : pas de doublon.")
     else:
@@ -237,4 +303,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
