@@ -23,8 +23,8 @@ from playwright.sync_api import sync_playwright
 CINEMA_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum"
 IMAX_EVENT_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289"
 PARIS = ZoneInfo("Europe/Paris")
-DEFAULT_START = date(2026, 12, 15)
-DEFAULT_DAYS = 8
+DEFAULT_START = date(2026, 12, 16)
+DEFAULT_DAYS = 7
 WEEKDAYS_FR = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
 MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.")
 
@@ -341,7 +341,7 @@ def check_imax_event_page(context, log: logging.Logger) -> list[Session]:
         if not is_dune_3(body):
             log.info("Page IMAX chargée mais Dune 3 n'y figure pas encore.")
             return []
-        return listed_dune_sessions(page, "Page IMAX dédiée")
+        return listed_dune_sessions(page, "Avant-première IMAX 70mm")
     finally:
         page.close()
 
@@ -408,7 +408,12 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
 def check(start: date, days: int, data_dir: Path, force_notify: bool = False) -> int:
     state_file = data_dir / "dune_pathe_state.json"
     log = setup_logging(data_dir / "dune_pathe_monitor.log")
-    log.info("Vérification quotidienne Dune 3 — Pathé Odysseum (période cible : %s sur %s jours)", start, days)
+    end_date = start + timedelta(days=days - 1)
+    log.info(
+        "Vérification quotidienne Dune 3 — Pathé Odysseum (période cible : %s au %s, + avant-première IMAX 70mm)",
+        start,
+        end_date,
+    )
 
     try:
         with sync_playwright() as p:
