@@ -16,6 +16,8 @@ on:
         description: "Forcer l'envoi de l'alerte même si déjà connue"
         type: boolean
         default: false
+  repository_dispatch:
+    types: [monitor_check]
 
 concurrency:
   group: dune-pathe-monitor
