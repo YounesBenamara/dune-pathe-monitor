@@ -1,15 +1,6 @@
 name: Surveiller Dune 3 — Pathé Odysseum
 
 on:
-  schedule:
-    # Premier check matinal anticipé à 07h52 Paris (05:52 UTC)
-    - cron: "52 5 * * *"
-    # Toutes les 15 minutes de 08h00 à 10h00 Paris (06h-08h UTC) aux minutes :07, :22, :37, :52
-    - cron: "7,22,37,52 6,7 * * *"
-    # Toutes les 15 minutes de 12h00 à 15h00 Paris (10h-13h UTC) aux minutes :07, :22, :37, :52
-    - cron: "7,22,37,52 10,11,12 * * *"
-    # Une fois par heure le reste du temps jusqu'à 20h00 Paris (10h, 11h, 15h, 16h, 17h, 18h, 19h, 20h) à la minute :07
-    - cron: "7 8,9,13,14,15,16,17,18 * * *"
   workflow_dispatch:
     inputs:
       force_notify:
