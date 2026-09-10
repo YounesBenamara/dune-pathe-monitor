@@ -414,7 +414,7 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
         for attempt in range(2):
             try:
                 response = page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=30_000)
-                if response and response.status == 403:
+                if response and response.status in (403, 429, 503):
                     page.wait_for_timeout(1_000)
                     probe = normalise(page.locator("body").inner_text(timeout=2_000))
                     if "Pathé" in probe or "Odysseum" in probe:
@@ -422,6 +422,8 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
                     if attempt == 0:
                         page.wait_for_timeout(1_000)
                         page.reload(wait_until="domcontentloaded", timeout=20_000)
+                    else:
+                        raise RuntimeError(f"Accès bloqué par Pathé (HTTP {response.status} / protection anti-bot)")
                 break
             except Exception as exc:
                 if attempt == 1:
@@ -439,6 +441,7 @@ def check_cinema_page(context, start: date, days: int, log: logging.Logger) -> l
         title = page.title()
         if not any(k in body.lower() or k in title.lower() for k in ["pathé", "pathe", "odysseum"]):
             log.warning("Page cinéma non validée (title: %r, snippet: %r)", title, body[:120])
+            raise RuntimeError(f"Contenu Pathé non reconnu ou bloqué (titre : {title!r})")
 
         sessions: list[Session] = []
 
