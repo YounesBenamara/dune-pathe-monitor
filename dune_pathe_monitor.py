@@ -167,7 +167,7 @@ def notify_ntfy(
     priority: str = "urgent",
     click_url: str = DECEMBER_15_URL,
 ) -> bool:
-    """Envoie une notification push ntfy avec lien cliquable et action directe."""
+    """Envoie une notification push ntfy via JSON avec lien cliquable et action directe."""
     topic = (os.getenv("NTFY_TOPIC") or "").strip()
     if not topic:
         log.warning("ntfy non configuré (NTFY_TOPIC manquant).")
@@ -177,24 +177,47 @@ def notify_ntfy(
     if not server.startswith(("http://", "https://")):
         server = f"https://{server}"
 
-    headers = {
-        "Title": safe_ascii_header(title),
-        "Priority": priority,
-        "Tags": tags,
+    priority_map = {
+        "min": 1,
+        "low": 2,
+        "default": 3,
+        "high": 4,
+        "urgent": 5,
     }
-    if click_url:
-        headers["Click"] = click_url
-        headers["Actions"] = f"view, Ouvrir la séance, {click_url}"
+    pri_int = priority_map.get(priority.lower(), 5 if priority == "urgent" else 3)
 
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    payload_data = {
+        "topic": topic,
+        "title": title,
+        "message": message,
+        "priority": pri_int,
+        "tags": tag_list,
+    }
+
+    if click_url:
+        payload_data["click"] = click_url
+        payload_data["actions"] = [
+            {
+                "action": "view",
+                "label": "Ouvrir la séance",
+                "url": click_url,
+            }
+        ]
+
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "dune-pathe-monitor/1.0",
+    }
     token = (os.getenv("NTFY_TOKEN") or "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    url = f"{server}/{topic}"
     try:
         request = urllib.request.Request(
-            url,
-            data=message.encode("utf-8"),
+            server,
+            data=json.dumps(payload_data, ensure_ascii=False).encode("utf-8"),
             headers=headers,
             method="POST",
         )
