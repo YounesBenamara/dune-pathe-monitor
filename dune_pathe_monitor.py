@@ -413,22 +413,26 @@ def send_immediate_alert(
     log: logging.Logger,
 ) -> None:
     """Envoie une alerte immédiate (Telegram + ntfy en parallèle) dès détection d'une séance."""
-    message = f"🚨 Dune 3 : séance(s) repérée(s) — {source_name} !\n\n"
+    message = f"🚨 DUNE 3 – SÉANCE DISPONIBLE AU PATHÉ ODYSSEUM !\n({source_name})\n\n"
     lines = []
     for s in fresh_sessions:
         item = f"• [{s.date_label}] {s.text}"
         if s.url:
-            item += f"\n  🔗 Réserver : {s.url}"
+            item += f"\n  👉 RÉSERVER ICI : {s.url}"
         lines.append(item)
     message += "\n".join(lines)
-    message += f"\n\n🔗 Accès direct :\n{direct_url}"
+    message += (
+        f"\n\n📅 Lien direct séance :\n{direct_url}\n"
+        f"🎟️ Événement IMAX 70mm :\n{IMAX_EVENT_URL}\n\n"
+        "⚡ Ouvre le lien le plus haut le plus vite possible !"
+    )
 
     log.warning(message)
     notify_all(
         message,
         log,
-        title=f"ALERTE Dune 3 - {source_name} !",
-        tags="rotating_light,ticket",
+        title=f"🚨 DUNE 3 DISPONIBLE – {source_name}",
+        tags="rotating_light,ticket,cinema",
         priority="urgent",
     )
 
