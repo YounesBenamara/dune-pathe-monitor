@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Diagnostic : intercepte tous les appels réseau et endpoints sur pathe.fr."""
+"""Test de connexion Playwright Chromium via proxy Webshare sur GitHub Actions."""
 
 from __future__ import annotations
-import json
 import logging
 import re
 import sys
@@ -10,16 +9,25 @@ from playwright.sync_api import sync_playwright
 
 def setup_logging():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
-    return logging.getLogger("diag")
+    return logging.getLogger("test_proxy")
 
 def run():
     log = setup_logging()
-    log.info("🔍 Diagnostic réseau Pathé sur GitHub Actions...")
+    log.info("🧪 Test Playwright avec Proxy Webshare...")
+
+    proxy_server = "http://31.59.20.176:6754"
+    proxy_user = "jspepmxl"
+    proxy_pass = "wyycy4hqi6d7"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            proxy={
+                "server": proxy_server,
+                "username": proxy_user,
+                "password": proxy_pass,
+            }
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
@@ -27,30 +35,32 @@ def run():
         )
         page = context.new_page()
 
-        endpoints = []
-        page.on("request", lambda req: endpoints.append((req.method, req.resource_type, req.url)))
+        # 1. Vérification de l'IP du proxy
+        try:
+            page.goto("https://api.ipify.org?format=json", timeout=15_000)
+            ip_info = page.locator("body").inner_text()
+            log.info("IP vue par le web via proxy : %s", ip_info)
+        except Exception as e:
+            log.error("Erreur vérification IP proxy : %s", e)
 
-        log.info("Visite de https://www.pathe.fr/ ...")
-        resp = page.goto("https://www.pathe.fr/", wait_until="networkidle", timeout=30_000)
-        log.info("Statut HTTP accueil: %s", resp.status if resp else "None")
-
-        log.info("--- Requêtes interceptées (XHR / Fetch / API) ---")
-        for method, rtype, url in endpoints:
-            if rtype in ("fetch", "xhr") or "api" in url or "pathe" in url:
-                log.info("[%s %s] %s", method, rtype, url[:120])
-
-        # Test d'autres routes Pathé : /films, /evenements
-        for test_url in [
-            "https://www.pathe.fr/films",
-            "https://www.pathe.fr/api/cinemas",
-            "https://www.pathe.fr/api/shows",
-            "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289",
-        ]:
-            try:
-                r = page.goto(test_url, wait_until="domcontentloaded", timeout=10_000)
-                log.info("Test route %s -> HTTP %s (Titre: %r)", test_url, r.status if r else "None", page.title())
-            except Exception as e:
-                log.info("Test route %s -> Erreur %s", test_url, e)
+        # 2. Test direct de la page Pathé Odysseum (18 sept)
+        target_url = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-09-18"
+        log.info("Chargement de : %s", target_url)
+        try:
+            resp = page.goto(target_url, wait_until="domcontentloaded", timeout=25_000)
+            log.info("Code HTTP retourné : %s", resp.status if resp else "None")
+            title = page.title()
+            body = page.locator("body").inner_text(timeout=5_000)
+            log.info("Titre : %r", title)
+            log.info("Aperçu body (150 car) : %r", body[:150].replace("\n", " "))
+            if "bound" in body.lower():
+                log.info("🎉🎉🎉 SUCCÈS TOTAL : LE FILM BOUND EST DÉTECTÉ VIA LE PROXY !")
+            elif "Allo Houston" in body:
+                log.warning("❌ Akamai a bloqué cette IP de proxy (Allo Houston).")
+            else:
+                log.info("ℹ️ Page chargée sans blocage, statut Bound : %s", "présent" if "bound" in body.lower() else "non trouvé")
+        except Exception as e:
+            log.error("Erreur chargement Pathé : %s", e)
 
         browser.close()
 
