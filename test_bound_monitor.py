@@ -260,33 +260,33 @@ def check_bound() -> int:
     log.info("🧪 [TEST BOUND] Début de la vérification pour le film BOUND le 18 septembre 2026...")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-infobars",
-            ],
-        )
+        try:
+            browser = p.firefox.launch(headless=True)
+            log.info("Lancement avec Firefox...")
+        except Exception as e:
+            log.info("Firefox non dispo (%s), fallback Chromium...", e)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-infobars",
+                ],
+            )
+
         context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/133.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
             locale="fr-FR",
             timezone_id="Europe/Paris",
         )
-        context.add_init_script(STEALTH_INIT_SCRIPT)
         page = context.new_page()
 
         # 1. Navigation vers l'URL officielle avec filtre de date
         log.info("Chargement de : %s", BOUND_URL)
         loaded = False
         try:
-            resp = page.goto(BOUND_URL, wait_until="domcontentloaded", timeout=25_000)
+            resp = page.goto(BOUND_URL, wait_until="domcontentloaded", timeout=30_000)
+            log.info("Code HTTP reçu : %s", resp.status if resp else "None")
             if resp and resp.status < 400:
                 loaded = True
             elif resp and resp.status in (403, 429, 503):
@@ -300,7 +300,6 @@ def check_bound() -> int:
                 log.info("Chargement de la page cinéma : %s", CINEMA_URL)
                 page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=25_000)
                 dismiss_overlays(page)
-                # Clic sur le 18 sept dans le carrousel
                 day_button = page.locator("button, a").filter(has_text=re.compile(r"18.*sept|sept.*18|ven\. 18", re.IGNORECASE)).first
                 if day_button.count() > 0:
                     log.info("Bouton du 18 septembre trouvé, clic en cours...")
@@ -311,12 +310,9 @@ def check_bound() -> int:
                 log.error("Échec du chargement alternatif : %s", e)
 
         dismiss_overlays(page)
-        try:
-            page.wait_for_selector("article, [class*='movie'], [class*='film'], h1, footer", timeout=3_000)
-        except Exception:
-            pass
+        page.wait_for_timeout(2_000)
 
-        body = normalise(page.locator("body").inner_text(timeout=3_000))
+        body = normalise(page.locator("body").inner_text(timeout=5_000))
         title = page.title()
         log.info("Page chargée : titre=%r, aperçu=%r", title, body[:120])
 
