@@ -22,11 +22,15 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 CINEMA_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum"
+DECEMBER_15_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-12-15"
+DECEMBER_16_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-12-16"
 IMAX_EVENT_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289"
-DECEMBER_16_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum?date=2026-12-16"
+IMAX_15_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289/filters/date-2026-12-15"
+IMAX_18_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289/filters/date-2026-12-18"
+
 PARIS = ZoneInfo("Europe/Paris")
-DEFAULT_START = date(2026, 12, 16)
-DEFAULT_DAYS = 7
+DEFAULT_START = date(2026, 12, 15)  # Surveillance dès l'avant-première du 15 décembre
+DEFAULT_DAYS = 8  # Du 15 au 22 décembre inclus
 WEEKDAYS_FR = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
 MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.")
 
@@ -56,12 +60,9 @@ Object.defineProperty(navigator, 'languages', {
 """
 
 
-def is_matching_movie(text: str, movie_title: str = "") -> bool:
-    """Détecte le film cible (Dune 3 par défaut, ou film personnalisé)."""
-    if movie_title:
-        pattern = r"\b" + re.escape(movie_title.strip().lower()) + r"\b"
-        return bool(re.search(pattern, text.lower()))
-    return is_dune_3(text)
+def cinema_filter_url(day: date) -> str:
+    """Génère l'URL officielle Pathé avec filtre de date dans le chemin."""
+    return f"{CINEMA_URL}/filters/date-{day.isoformat()}"
 
 
 def is_dune_3(text: str) -> bool:
@@ -164,8 +165,9 @@ def notify_ntfy(
     title: str = "Dune 3 - Pathe Odysseum",
     tags: str = "movie_camera,ticket",
     priority: str = "urgent",
+    click_url: str = DECEMBER_15_URL,
 ) -> bool:
-    """Envoie une notification push ntfy vers un topic public ou protégé."""
+    """Envoie une notification push ntfy avec lien cliquable et action directe."""
     topic = (os.getenv("NTFY_TOPIC") or "").strip()
     if not topic:
         log.warning("ntfy non configuré (NTFY_TOPIC manquant).")
@@ -180,6 +182,10 @@ def notify_ntfy(
         "Priority": priority,
         "Tags": tags,
     }
+    if click_url:
+        headers["Click"] = click_url
+        headers["Actions"] = f"view, Ouvrir la séance, {click_url}"
+
     token = (os.getenv("NTFY_TOKEN") or "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -208,11 +214,12 @@ def notify_all(
     title: str = "Dune 3 - Pathe Odysseum",
     tags: str = "movie_camera,ticket",
     priority: str = "urgent",
+    click_url: str = DECEMBER_15_URL,
 ) -> None:
     """Alerte Telegram et ntfy en parallèle pour un envoi instantané."""
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_tg = executor.submit(notify_telegram, message, log)
-        future_ntfy = executor.submit(notify_ntfy, message, log, title, tags, priority)
+        future_ntfy = executor.submit(notify_ntfy, message, log, title, tags, priority, click_url)
         res_tg = future_tg.result()
         res_ntfy = future_ntfy.result()
 
@@ -225,7 +232,7 @@ def notify_all(
 
 
 def pathé_date_label(day: date) -> str:
-    """Libellé court utilisé par le carrousel de dates de Pathé, p.ex. « mer. 16 déc. »."""
+    """Libellé court utilisé par le carrousel de dates de Pathé, p.ex. « mar. 15 déc. »."""
     return f"{WEEKDAYS_FR[day.weekday()]} {day.day} {MONTHS_FR[day.month - 1]}"
 
 
@@ -258,8 +265,7 @@ def create_stealth_context(browser):
     )
     context.add_init_script(STEALTH_INIT_SCRIPT)
 
-    # Blocage des ressources lourdes et superflues (images, médias, polices, traceurs publicitaires)
-    # Accélère le chargement de la page de 3x à 5x
+    # Blocage des ressources lourdes et traceurs pour un chargement 3x plus rapide
     blocked_exts = re.compile(r"\.(png|jpe?g|webp|svg|gif|woff2?|ttf|eot|mp4|webm|avi)$", re.IGNORECASE)
     blocked_trackers = re.compile(
         r"(google-analytics|googletagmanager|doubleclick|criteo|facebook|tiktok|eulerian|hotjar|optimizely)",
@@ -301,12 +307,11 @@ def is_valid_showtime(text: str) -> bool:
     if not match:
         return False
     hour = int(match.group(1))
-    # Horaires réalistes de séances de cinéma (09h00 à 23h59 ou séances tardives 00h-01h)
     return 9 <= hour <= 23 or hour <= 1
 
 
-def listed_dune_sessions(page, context_label: str, movie_title: str = "") -> list[Session]:
-    """Extrait les séances pour le film cible : réservables, avec horaire, ou indiquées COMPLET."""
+def listed_dune_sessions(page, context_label: str) -> list[Session]:
+    """Extrait les séances pour Dune 3 : réservables, avec horaire, ou indiquées COMPLET."""
     results: list[Session] = []
     seen: set[str] = set()
 
@@ -314,44 +319,29 @@ def listed_dune_sessions(page, context_label: str, movie_title: str = "") -> lis
         "article, [class*='movie'], [class*='film'], [class*='schedule'], [class*='card'], [data-testid*='movie']"
     ).all()
 
-    matched_cards = []
     for card in cards:
         try:
             card_text = normalise(card.inner_text(timeout=1_500))
         except Exception:
             continue
 
-        if is_matching_movie(card_text, movie_title):
-            matched_cards.append((card, card_text))
+        if not is_dune_3(card_text):
+            continue
 
-    # Recherche directe si aucune card standard n'a matché
-    if not matched_cards:
-        try:
-            pattern = re.compile(r"\b" + re.escape(movie_title or "dune") + r"\b", re.IGNORECASE)
-            title_nodes = page.get_by_text(pattern).all()
-            for tn in title_nodes[:3]:
-                parent = tn.locator("xpath=ancestor::*[self::article or self::section or contains(@class,'card') or contains(@class,'movie') or contains(@class,'film') or self::li][1]")
-                if parent.count() > 0:
-                    matched_cards.append((parent.first, normalise(parent.first.inner_text(timeout=1_500))))
-        except Exception:
-            pass
-
-    for card, card_text in matched_cards:
         elements = card.locator(
-            "button, a, time, span, [class*='session'], [class*='showtime'], [class*='slot'], [class*='time'], [class*='complet']"
+            "button, a, time, [class*='session'], [class*='showtime'], [class*='slot'], [class*='complet']"
         ).all()
 
         for el in elements:
             try:
                 text = normalise(el.inner_text(timeout=800))
-                if not text or len(text) > 50:
+                if not text or len(text) > 40:
                     continue
                 t_lower = text.lower()
                 is_time = is_valid_showtime(text)
                 is_booking = any(w in t_lower for w in ["réserver", "reserver", "billet", "acheter"])
                 is_complet = "complet" in t_lower
 
-                # On retient la séance si elle a un vrai horaire, un bouton de réservation ou si elle est COMPLET
                 if is_time or is_booking or is_complet:
                     if is_complet:
                         desc = f"Séance (COMPLET) : {text}"
@@ -379,67 +369,7 @@ def listed_dune_sessions(page, context_label: str, movie_title: str = "") -> lis
             except Exception:
                 continue
 
-    # Fallback si le film est présent au programme mais sans boutons de séance isolés
-    if not results and matched_cards:
-        card, card_text = matched_cards[0]
-        href = ""
-        try:
-            links = card.locator("a[href]").all()
-            for l in links:
-                h = l.get_attribute("href") or ""
-                if h and not h.startswith("#"):
-                    href = urllib.parse.urljoin("https://www.pathe.fr", h)
-                    break
-        except Exception:
-            pass
-        target_display = movie_title if movie_title else "Dune 3"
-        results.append(Session(context_label, f"Film {target_display} présent au programme ({card_text[:80]}...)", url=href))
-
     return results
-
-
-def select_day_if_available(page, day: date, log: logging.Logger) -> bool:
-    """Tente de sélectionner un jour dans le carrousel si disponible (non bloquant)."""
-    label = pathé_date_label(day)
-    try:
-        choices = page.get_by_text(label, exact=True)
-        if choices.count() == 0:
-            log.info("Date %s non présente dans le carrousel (réservation lointaine).", label)
-            return False
-        choices.first.click(timeout=2_000)
-        page.wait_for_timeout(250)
-        return True
-    except Exception as exc:
-        log.debug("Impossible de cliquer sur %s : %s", label, exc)
-        return False
-
-
-def check_imax_event_page(context, log: logging.Logger) -> list[Session]:
-    """Vérifie la page dédiée à l'événement / projection IMAX si elle existe."""
-    page = context.new_page()
-    try:
-        try:
-            response = page.goto(IMAX_EVENT_URL, wait_until="domcontentloaded", timeout=20_000)
-            if response and response.status >= 400:
-                log.info("Page événement IMAX non accessible (HTTP %s).", response.status)
-                return []
-        except Exception as exc:
-            log.info("Page événement IMAX non joignable pour le moment : %s", exc)
-            return []
-
-        dismiss_overlays(page)
-        try:
-            page.wait_for_selector("article, h1, [class*='event'], [class*='movie'], body", timeout=2_000)
-        except Exception:
-            pass
-
-        body = normalise(page.locator("body").inner_text(timeout=3_000))
-        if not is_dune_3(body):
-            log.info("Page IMAX chargée mais Dune 3 n'y figure pas encore.")
-            return []
-        return listed_dune_sessions(page, "Avant-première IMAX 70mm")
-    finally:
-        page.close()
 
 
 def send_immediate_alert(
@@ -447,94 +377,112 @@ def send_immediate_alert(
     direct_url: str,
     source_name: str,
     log: logging.Logger,
-    movie_title: str = "",
 ) -> None:
     """Envoie une alerte immédiate (Telegram + ntfy en parallèle) dès détection d'une séance."""
-    display_title = movie_title.upper() if movie_title else "DUNE 3"
-    message = f"🚨 {display_title} – SÉANCE DISPONIBLE AU PATHÉ ODYSSEUM !\n({source_name})\n\n"
+    message = f"🚨 DUNE 3 – SÉANCE DISPONIBLE AU PATHÉ ODYSSEUM !\n({source_name})\n\n"
     lines = []
+    first_res_url = ""
     for s in fresh_sessions:
         item = f"• [{s.date_label}] {s.text}"
         if s.url:
             item += f"\n  👉 RÉSERVER ICI : {s.url}"
+            if not first_res_url:
+                first_res_url = s.url
         lines.append(item)
     message += "\n".join(lines)
-    message += f"\n\n📅 Lien direct séance :\n{direct_url}\n"
-    if not movie_title or "dune" in movie_title.lower():
-        message += f"🎟️ Événement IMAX 70mm :\n{IMAX_EVENT_URL}\n"
-    message += "\n⚡ Ouvre le lien le plus haut le plus vite possible !"
+    message += (
+        f"\n\n📅 Lien direct séance :\n{direct_url}\n\n"
+        f"📅 Avant-première 15 décembre :\n{DECEMBER_15_URL}\n"
+        f"📅 Sortie nationale 16 décembre :\n{DECEMBER_16_URL}\n"
+        f"🎟️ Événement IMAX 70mm :\n{IMAX_EVENT_URL}\n\n"
+        "⚡ Ouvre le lien le plus haut le plus vite possible !"
+    )
 
+    click_target = first_res_url or direct_url or DECEMBER_15_URL
     log.warning(message)
     notify_all(
         message,
         log,
-        title=f"🚨 {display_title} DISPONIBLE – {source_name}",
+        title=f"🚨 DUNE 3 DISPONIBLE – {source_name}",
         tags="rotating_light,ticket,cinema",
         priority="urgent",
+        click_url=click_target,
     )
 
 
-def check_single_date_page(page, day: date, log: logging.Logger, movie_title: str = "") -> list[Session]:
-    """Vérifie la programmation d'une date spécifique via son URL directe avec paramètre date."""
-    day_url = f"{CINEMA_URL}?date={day.isoformat()}"
-    for attempt in range(2):
-        try:
-            response = page.goto(day_url, wait_until="domcontentloaded", timeout=25_000)
-            if response and response.status in (403, 429, 503):
-                page.wait_for_timeout(1_000)
-                probe = normalise(page.locator("body").inner_text(timeout=2_000))
-                if "Pathé" in probe or "Odysseum" in probe:
-                    break
-                if attempt == 0:
-                    page.wait_for_timeout(1_000)
-                    page.reload(wait_until="domcontentloaded", timeout=20_000)
-                else:
-                    raise RuntimeError(f"Accès bloqué par Pathé (HTTP {response.status} / protection anti-bot)")
-            break
-        except Exception as exc:
-            if attempt == 1:
-                raise exc
+def check_imax_event_page(context, log: logging.Logger) -> list[Session]:
+    """Vérifie la page dédiée à l'événement / projection IMAX si elle existe."""
+    page = context.new_page()
+    try:
+        for url in [IMAX_15_URL, IMAX_EVENT_URL]:
+            try:
+                response = page.goto(url, wait_until="domcontentloaded", timeout=15_000)
+                if response and response.status >= 400:
+                    continue
+                dismiss_overlays(page)
+                body = normalise(page.locator("body").inner_text(timeout=2_500))
+                if is_dune_3(body):
+                    sessions = listed_dune_sessions(page, "Avant-première IMAX 70mm")
+                    if sessions:
+                        return sessions
+            except Exception as exc:
+                log.debug("Erreur accès IMAX %s : %s", url, exc)
+                continue
+        log.info("Page IMAX vérifiée : Dune 3 n'y figure pas encore.")
+        return []
+    finally:
+        page.close()
+
+
+def check_single_date_page(page, day: date, log: logging.Logger) -> list[Session]:
+    """Vérifie la programmation d'une date spécifique via son URL officielle avec filtre."""
+    day_url = cinema_filter_url(day)
+    try:
+        response = page.goto(day_url, wait_until="domcontentloaded", timeout=25_000)
+        if response and response.status in (403, 429, 503):
+            page.wait_for_timeout(1_000)
+            probe = normalise(page.locator("body").inner_text(timeout=2_000))
+            if "Pathé" not in probe and "Odysseum" not in probe:
+                log.warning("Page date %s bloquée par protection anti-bot (HTTP %s)", day, response.status)
+                return []
+    except Exception as exc:
+        log.warning("Impossible de charger la page du %s : %s", day, exc)
+        return []
 
     dismiss_overlays(page)
 
-    # Attente dynamique du contenu
     try:
-        page.wait_for_selector("article, [class*='movie'], [class*='film'], h1, footer", timeout=2_500)
+        page.wait_for_selector("article, [class*='movie'], [class*='film'], h1, footer", timeout=2_000)
     except Exception:
         pass
 
-    body = normalise(page.locator("body").inner_text(timeout=2_500))
+    body = normalise(page.locator("body").inner_text(timeout=2_000))
     title = page.title()
     if not any(k in body.lower() or k in title.lower() for k in ["pathé", "pathe", "odysseum"]):
-        log.warning("Page date %s non validée (title: %r, snippet: %r)", day, title, body[:120])
-        raise RuntimeError(f"Contenu Pathé non reconnu ou bloqué pour {day} (titre : {title!r})")
-
-    target_name = movie_title if movie_title else "Dune 3"
-    if not is_matching_movie(body, movie_title):
-        log.info("Page %s vérifiée : %s n'y figure pas.", day, target_name)
+        log.info("Page date %s : contenu non reconnu ou inaccessible (titre: %r)", day, title)
         return []
 
-    log.info("🎯 %s détecté dans la page du %s ! Analyse des séances...", target_name, day)
-    return listed_dune_sessions(page, pathé_date_label(day), movie_title=movie_title)
+    if not is_dune_3(body):
+        log.info("Page %s vérifiée : aucune trace de Dune 3.", day)
+        return []
+
+    log.info("🎯 DUNE 3 détecté dans la page du %s ! Analyse des séances...", day)
+    return listed_dune_sessions(page, pathé_date_label(day))
 
 
 def check(
-    start: date,
-    days: int,
-    data_dir: Path,
+    start: date = DEFAULT_START,
+    days: int = DEFAULT_DAYS,
+    data_dir: Path = Path(__file__).parent,
     force_notify: bool = False,
-    movie_title: str = "",
 ) -> int:
     state_file = data_dir / "dune_pathe_state.json"
     log = setup_logging(data_dir / "dune_pathe_monitor.log")
     end_date = start + timedelta(days=days - 1)
-    target_display = movie_title.upper() if movie_title else "DUNE 3"
     log.info(
-        "Vérification ultra-rapide %s — Pathé Odysseum (période cible : %s au %s%s)",
-        target_display,
+        "Vérification ultra-rapide Dune 3 — Pathé Odysseum (période cible : %s au %s, + avant-première IMAX 70mm)",
         start,
         end_date,
-        ", + avant-première IMAX 70mm" if (not movie_title or "dune" in movie_title.lower()) else "",
     )
 
     state = load_state(state_file)
@@ -558,79 +506,91 @@ def check(
                 context = create_stealth_context(browser)
                 sources_ok = 0
 
-                # 1. ÉTAPE PRIORITAIRE N°1 : La date de départ (16 décembre pour Dune, ou date de test)
+                # 1. ÉTAPE PRIORITAIRE N°1 : Le 15 décembre (Avant-première la veille)
                 cinema_page = context.new_page()
                 try:
-                    start_day_url = f"{CINEMA_URL}?date={start.isoformat()}"
-                    start_label = f"{pathé_date_label(start)} (Jour 1)"
+                    day_15_sessions = check_single_date_page(cinema_page, start, log)
+                    all_detected_sessions.extend(day_15_sessions)
+                    sources_ok += 1
+
+                    fresh_15 = [s for s in day_15_sessions if s.key not in known_keys]
+                    if fresh_15:
+                        send_immediate_alert(fresh_15, DECEMBER_15_URL, "15 décembre (Avant-première)", log)
+                        for s in fresh_15:
+                            known_keys.add(s.key)
+                        total_fresh_notified += len(fresh_15)
+                        state["active_session_keys"] = list(known_keys)
+                        save_state(state_file, all_detected_sessions)
+                    elif force_notify and not force_notified_sent:
+                        # Test manuel envoyé immédiatement dès la vérification du 15 décembre
+                        test_msg = (
+                            "🧪 [TEST MANUEL] Moniteur Dune 3 — Pathé Odysseum\n\n"
+                            "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
+                            "ℹ️ Le 15 décembre (avant-première) et le 16 décembre (sortie nationale) ont été vérifiés en priorité.\n"
+                            "Aucune séance n'est ouverte pour le moment (zéro faux positif).\n"
+                            "La surveillance continue pour l'IMAX 70mm et les autres dates.\n\n"
+                            "🔗 Liens directs avec filtres :\n"
+                            f"📅 Avant-première 15 décembre :\n{DECEMBER_15_URL}\n\n"
+                            f"📅 Sortie nationale 16 décembre :\n{DECEMBER_16_URL}\n\n"
+                            f"🎟️ Événement IMAX 70mm :\n{IMAX_EVENT_URL}\n"
+                            f"{IMAX_18_URL}"
+                        )
+                        log.info("Envoi immédiat du test manuel dès la vérification du 15 décembre.")
+                        notify_all(
+                            test_msg,
+                            log,
+                            title="[TEST] Moniteur Dune 3 - Pathe Odysseum",
+                            tags="test_tube,white_check_mark",
+                            priority="default",
+                            click_url=DECEMBER_15_URL,
+                        )
+                        force_notified_sent = True
+
+                    # 2. ÉTAPE PRIORITAIRE N°2 : Le 16 décembre (Jour de sortie nationale)
+                    day_16 = date(2026, 12, 16)
+                    day_16_sessions = check_single_date_page(cinema_page, day_16, log)
+                    all_detected_sessions.extend(day_16_sessions)
+                    sources_ok += 1
+
+                    fresh_16 = [s for s in day_16_sessions if s.key not in known_keys]
+                    if fresh_16:
+                        send_immediate_alert(fresh_16, DECEMBER_16_URL, "16 décembre (Sortie nationale)", log)
+                        for s in fresh_16:
+                            known_keys.add(s.key)
+                        total_fresh_notified += len(fresh_16)
+                        state["active_session_keys"] = list(known_keys)
+                        save_state(state_file, all_detected_sessions)
+
+                    # 3. ÉTAPE PRIORITAIRE N°3 : Page Événement Avant-première IMAX 70mm
                     try:
-                        day_1_sessions = check_single_date_page(cinema_page, start, log, movie_title=movie_title)
-                        all_detected_sessions.extend(day_1_sessions)
+                        imax_sessions = check_imax_event_page(context, log)
+                        all_detected_sessions.extend(imax_sessions)
                         sources_ok += 1
 
-                        fresh_1 = [s for s in day_1_sessions if s.key not in known_keys]
-                        if fresh_1:
-                            send_immediate_alert(fresh_1, start_day_url, start_label, log, movie_title=movie_title)
-                            for s in fresh_1:
+                        fresh_imax = [s for s in imax_sessions if s.key not in known_keys]
+                        if fresh_imax:
+                            send_immediate_alert(fresh_imax, IMAX_EVENT_URL, "Avant-première IMAX 70mm", log)
+                            for s in fresh_imax:
                                 known_keys.add(s.key)
-                            total_fresh_notified += len(fresh_1)
+                            total_fresh_notified += len(fresh_imax)
                             state["active_session_keys"] = list(known_keys)
                             save_state(state_file, all_detected_sessions)
-                        elif force_notify and not force_notified_sent:
-                            # Test manuel déclenché immédiatement dès la seconde 2 sans attendre les autres jours
-                            test_msg = (
-                                f"🧪 [TEST MANUEL] Moniteur {target_display} — Pathé Odysseum\n\n"
-                                "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
-                                f"ℹ️ La date du {pathé_date_label(start)} a été vérifiée en priorité : aucune séance n'est ouverte pour le moment (zéro faux positif).\n"
-                                "La surveillance continue pour les autres créneaux.\n\n"
-                                "🔗 Liens d'accès direct :\n"
-                                f"📅 Séances du {start.isoformat()} :\n{start_day_url}"
-                            )
-                            if not movie_title or "dune" in movie_title.lower():
-                                test_msg += f"\n\n🎟️ Avant-première IMAX 70mm :\n{IMAX_EVENT_URL}"
-                            log.info("Envoi immédiat du test manuel dès la vérification de la date de départ.")
-                            notify_all(
-                                test_msg,
-                                log,
-                                title=f"[TEST] Moniteur {target_display} - Pathe Odysseum",
-                                tags="test_tube,white_check_mark",
-                                priority="default",
-                            )
-                            force_notified_sent = True
-                    except Exception as day_1_exc:
-                        log.error("Erreur vérification date %s : %s", start, day_1_exc)
+                    except Exception as exc:
+                        log.warning("Erreur vérification page IMAX : %s", exc)
 
-                    # 2. ÉTAPE PRIORITAIRE N°2 : Page Événement Avant-première IMAX 70mm (uniquement si Dune)
-                    if not movie_title or "dune" in movie_title.lower():
-                        try:
-                            imax_sessions = check_imax_event_page(context, log)
-                            all_detected_sessions.extend(imax_sessions)
-                            sources_ok += 1
-
-                            fresh_imax = [s for s in imax_sessions if s.key not in known_keys]
-                            if fresh_imax:
-                                send_immediate_alert(fresh_imax, IMAX_EVENT_URL, "Avant-première IMAX 70mm", log, movie_title=movie_title)
-                                for s in fresh_imax:
-                                    known_keys.add(s.key)
-                                total_fresh_notified += len(fresh_imax)
-                                state["active_session_keys"] = list(known_keys)
-                                save_state(state_file, all_detected_sessions)
-                        except Exception as exc:
-                            log.warning("Erreur vérification page IMAX : %s", exc)
-
-                    # 3. ÉTAPE DATES SUIVANTES
-                    for offset in range(1, days):
+                    # 4. ÉTAPE DATES SUIVANTES (17 au 22 décembre)
+                    for offset in range(2, days):
                         day = start + timedelta(days=offset)
-                        day_url = f"{CINEMA_URL}?date={day.isoformat()}"
+                        day_url = cinema_filter_url(day)
                         try:
-                            day_sessions = check_single_date_page(cinema_page, day, log, movie_title=movie_title)
+                            day_sessions = check_single_date_page(cinema_page, day, log)
                             all_detected_sessions.extend(day_sessions)
                             sources_ok += 1
 
                             fresh_day = [s for s in day_sessions if s.key not in known_keys]
                             if fresh_day:
                                 label = pathé_date_label(day)
-                                send_immediate_alert(fresh_day, day_url, f"Séances du {label}", log, movie_title=movie_title)
+                                send_immediate_alert(fresh_day, day_url, f"Séances du {label}", log)
                                 for s in fresh_day:
                                     known_keys.add(s.key)
                                 total_fresh_notified += len(fresh_day)
@@ -651,7 +611,7 @@ def check(
             state = load_state(state_file)
             if not state.get("in_error"):
                 err_msg = (
-                    f"⚠️ Alerte Moniteur {target_display} : Problème d'accès au site Pathé Odysseum\n\n"
+                    "⚠️ Alerte Moniteur Dune 3 : Problème d'accès au site Pathé Odysseum\n\n"
                     f"Détail : {exc}\n\n"
                     "Le site Pathé ou sa protection anti-bot bloque la connexion ou est temporairement inaccessible. "
                     "Une nouvelle tentative aura lieu au prochain créneau programmé."
@@ -662,6 +622,7 @@ def check(
                     title="Alerte : Acces Pathe bloque",
                     tags="warning,shield",
                     priority="high",
+                    click_url=DECEMBER_15_URL,
                 )
                 state["in_error"] = True
                 state["last_error"] = str(exc)
@@ -674,7 +635,7 @@ def check(
     state = load_state(state_file)
     if state.get("in_error"):
         recover_msg = (
-            f"✅ Moniteur {target_display} : Accès au site Pathé Odysseum rétabli !\n\n"
+            "✅ Moniteur Dune 3 : Accès au site Pathé Odysseum rétabli !\n\n"
             "La vérification a pu s'effectuer normalement avec succès."
         )
         notify_all(
@@ -683,6 +644,7 @@ def check(
             title="Acces Pathe retabli",
             tags="white_check_mark",
             priority="default",
+            click_url=DECEMBER_15_URL,
         )
         state["in_error"] = False
         state["last_error"] = None
@@ -695,50 +657,50 @@ def check(
             seen_keys.add(s.key)
             unique_sessions.append(s)
 
-    start_day_url = f"{CINEMA_URL}?date={start.isoformat()}"
     if force_notify:
         if unique_sessions and total_fresh_notified == 0:
-            send_immediate_alert(unique_sessions, start_day_url, "Séances disponibles", log, movie_title=movie_title)
+            send_immediate_alert(unique_sessions, DECEMBER_15_URL, "Séances disponibles", log)
         elif not force_notified_sent and total_fresh_notified == 0:
             test_message = (
-                f"🧪 [TEST MANUEL] Moniteur {target_display} — Pathé Odysseum\n\n"
+                "🧪 [TEST MANUEL] Moniteur Dune 3 — Pathé Odysseum\n\n"
                 "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
-                f"ℹ️ Aucune séance n'est ouverte pour le moment pour {target_display} (zéro faux positif).\n"
+                "ℹ️ Aucune séance n'est ouverte pour le moment (zéro faux positif).\n"
                 "La surveillance automatique est active selon le planning programmé.\n\n"
-                "🔗 Liens d'accès direct :\n"
-                f"📅 Séances du {start.isoformat()} :\n{start_day_url}"
+                "🔗 Liens directs avec filtres :\n"
+                f"📅 Avant-première 15 décembre :\n{DECEMBER_15_URL}\n\n"
+                f"📅 Sortie nationale 16 décembre :\n{DECEMBER_16_URL}\n\n"
+                f"🎟️ Événement IMAX 70mm :\n{IMAX_EVENT_URL}\n"
+                f"{IMAX_18_URL}"
             )
-            if not movie_title or "dune" in movie_title.lower():
-                test_message += f"\n\n🎟️ Avant-première IMAX 70mm :\n{IMAX_EVENT_URL}"
             log.info("Envoi de la notification de test manuel (sans fausse alerte).")
             notify_all(
                 test_message,
                 log,
-                title=f"[TEST] Moniteur {target_display} - Pathe Odysseum",
+                title="[TEST] Moniteur Dune 3 - Pathe Odysseum",
                 tags="test_tube,white_check_mark",
                 priority="default",
+                click_url=DECEMBER_15_URL,
             )
     else:
         if unique_sessions and total_fresh_notified == 0:
-            log.info("Séance(s) %s déjà connue(s) (%d séance(s)) : pas de doublon.", target_display, len(unique_sessions))
+            log.info("Séance(s) Dune déjà connue(s) (%d séance(s)) : pas de doublon.", len(unique_sessions))
         elif not unique_sessions:
-            log.info("Aucune séance ni trace de %s affichée à cette vérification.", target_display)
+            log.info("Aucune séance ni trace de Dune 3 affichée à cette vérification.")
 
     save_state(state_file, unique_sessions)
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Moniteur cinéma Pathé Odysseum (Dune 3 par défaut)")
+    parser = argparse.ArgumentParser(description="Moniteur Dune 3 / Odysseum")
     parser.add_argument("--start-date", type=date.fromisoformat, default=DEFAULT_START)
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).parent)
     parser.add_argument("--force-notify", action="store_true", help="Force l'envoi d'une notification de test")
-    parser.add_argument("--movie-title", type=str, default="", help="Nom du film à surveiller (par défaut Dune 3)")
     args = parser.parse_args()
     if args.days < 1:
         parser.error("--days doit être positif")
-    return check(args.start_date, args.days, args.data_dir, args.force_notify, movie_title=args.movie_title)
+    return check(args.start_date, args.days, args.data_dir, args.force_notify)
 
 
 if __name__ == "__main__":
