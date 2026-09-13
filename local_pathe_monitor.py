@@ -2,10 +2,10 @@
 """Moniteur LOCAL permanent pour Dune 3 à Pathé Odysseum (Montpellier).
 
 Tourne 24h/24 en continu sur ton PC :
-1. Surveille la page officielle Événement IMAX 70mm sur pathe.fr (Statut 200 OK).
-2. Surveille la page du cinéma Pathé Odysseum (Statut 200 OK).
-3. Surveille le flux direct AlloCiné pour le 16 décembre (qui renvoie les liens Pathé).
-4. Dès détection, envoie l'alerte immédiate sur Telegram et ntfy avec les liens officiels de réservation Pathé.
+1. Surveille la page officielle Événement IMAX 70mm sur pathe.fr (Détection stricte de séances avec horaire).
+2. Surveille la page du cinéma Pathé Odysseum (Détection stricte de séances avec horaire).
+3. Surveille le flux officiel AlloCiné pour le 16 décembre (qui renvoie les liens Pathé).
+4. Zéro faux positif : une simple mention du titre ou un mot de menu ne déclenche JAMAIS d'alerte.
 """
 
 from __future__ import annotations
@@ -238,15 +238,56 @@ def is_dune_3(text: str) -> bool:
     return any(kw in t for kw in keywords)
 
 
+def extract_time_slots(page) -> list[dict]:
+    """Recherche de vrais créneaux horaires de séances cliquables dans le DOM."""
+    slots = []
+    # Rechercher les boutons, liens ou éléments de créneaux (ex: 20h15, 19:45)
+    elements = page.locator("button, a, time, [class*='slot'], [class*='session'], [class*='showtime']").all()
+    for el in elements:
+        try:
+            txt = el.inner_text().strip()
+            # Match strict pour une heure de séance (ex: 14h00, 20:15)
+            m = re.search(r"\b(0?[9]|1[0-9]|2[0-3])[:h]([0-5][0-9])\b", txt)
+            if not m:
+                continue
+
+            # Vérifier si l'élément ou un parent est lié à la réservation
+            href = el.get_attribute("href") or ""
+            if not href:
+                parent = el.locator("xpath=ancestor-or-self::a").first
+                if parent.count() > 0:
+                    href = parent.get_attribute("href") or ""
+
+            # Contexte autour du bouton
+            context_text = ""
+            try:
+                card = el.locator("xpath=ancestor::*[contains(@class, 'card') or contains(@class, 'movie') or contains(@class, 'schedule')][1]").first
+                if card.count() > 0:
+                    context_text = card.inner_text()
+            except Exception:
+                pass
+
+            slots.append({
+                "time": m.group(0),
+                "href": href,
+                "context": context_text,
+                "is_imax": "imax" in (txt + context_text).lower(),
+            })
+        except Exception:
+            continue
+    return slots
+
+
 def check_pathe_page(page, url: str, label: str, log: logging.Logger) -> list[DetectedSession]:
-    """Charge une page Pathé via Chrome avec résolution DNS interne."""
+    """Charge une page Pathé et n'alerte QUE si de vraies séances avec horaires sont réservables."""
     sessions: list[DetectedSession] = []
     try:
-        log.info("[Pathé] Chargement de %s...", label)
+        t0 = time.time()
         res = page.goto(url, wait_until="domcontentloaded", timeout=12000)
+        elapsed = (time.time() - t0) * 1000
         status = res.status if res else 0
 
-        # Fermer cookies
+        # Fermer cookies si présents
         for sel in ["#onetrust-accept-btn-handler", "button:has-text('Accepter')"]:
             try:
                 btn = page.locator(sel).first
@@ -264,43 +305,55 @@ def check_pathe_page(page, url: str, label: str, log: logging.Logger) -> list[De
         title = page.title()
 
         if "Allo Houston" in body or status == 403:
-            log.warning("[Pathé] Page %s temporairement bloquée par Akamai (403).", label)
+            log.warning("[Pathé] %s : Akamai 403 (Allo Houston) [%.0fms]", label, elapsed)
             return []
 
-        # Vérifier si Dune 3 est présent
+        # Vérifier si Dune 3 est mentionné
         if not is_dune_3(body) and not is_dune_3(title):
-            log.info("[Pathé] %s vérifié (HTTP %s) : aucune séance Dune 3 ouverte.", label, status)
+            log.info("[Pathé] %s : HTTP %s [%.0fms] — Aucune mention de Dune 3.", label, status, elapsed)
             return []
 
-        # Détecter si des séances ou boutons de réservation sont disponibles
-        has_book_btn = any(w in body.lower() for w in ["réserver", "reserver", "horaires", "séance", "seance", "billet", "choisir mon siège"])
-        is_imax = "imax" in body.lower()
+        # STRICT : Vérifier la présence de vrais créneaux horaires
+        slots = extract_time_slots(page)
+        if not slots:
+            log.info(
+                "[Pathé] %s : HTTP %s [%.0fms] — Dune 3 est mentionné (article/page descriptive), mais AUCUNE séance horaire n'est ouverte.",
+                label,
+                status,
+                elapsed,
+            )
+            return []
 
-        log.info("🎯 [Pathé] %s actif (Dune 3 présent, Réservable=%s, IMAX=%s)", label, has_book_btn, is_imax)
-
-        if has_book_btn:
+        # Si des créneaux réels sont trouvés
+        log.warning("🚨 [Pathé] VRAIE(S) SÉANCE(S) HORAIRE(S) OUVERTE(S) SUR %s : %d créneau(x) !", label, len(slots))
+        for slot in slots:
+            booking_url = slot["href"] or url
+            if booking_url.startswith("/"):
+                booking_url = f"https://www.pathe.fr{booking_url}"
             sessions.append(
                 DetectedSession(
-                    source="Pathé Officiel",
+                    source="Pathé Direct",
                     date_str="2026-12-16" if "16" in label else "2026-12-15",
-                    label=f"{label} : Réservation active !",
-                    format_str="IMAX 70mm" if is_imax else "Standard",
-                    is_imax=is_imax,
-                    url=url,
+                    label=f"Séance {slot['time']} - {label}",
+                    format_str="IMAX 70mm" if slot["is_imax"] else "Standard",
+                    is_imax=slot["is_imax"],
+                    url=booking_url,
                 )
             )
     except Exception as exc:
-        log.warning("[Pathé] Requête vers %s : %s", label, exc)
+        log.warning("[Pathé] Erreur lors de la vérification de %s : %s", label, exc)
     return sessions
 
 
 def check_allocine_16(page, log: logging.Logger) -> list[DetectedSession]:
-    """Vérifie l'API AlloCiné directement depuis Chrome (utilise la même connexion débloquée)."""
+    """Vérifie l'API interne AlloCiné pour le 16 décembre (P0702)."""
     sessions: list[DetectedSession] = []
     try:
-        log.info("[AlloCiné] Vérification du flux du 16 décembre...")
+        t0 = time.time()
         res = page.goto(ALLOCINE_16_API, wait_until="domcontentloaded", timeout=10000)
+        elapsed = (time.time() - t0) * 1000
         if not res or res.status != 200:
+            log.warning("[AlloCiné] HTTP %s pour le flux 16 décembre", res.status if res else "Erreur")
             return []
 
         content = page.locator("body").inner_text(timeout=2000)
@@ -308,11 +361,10 @@ def check_allocine_16(page, log: logging.Logger) -> list[DetectedSession]:
         results = data.get("results", [])
 
         if not results:
-            log.info("[AlloCiné] 16 décembre : results est vide (préventes pas encore synchronisées).")
+            log.info("[AlloCiné] 16 décembre : HTTP 200 [%.0fms] — results est vide (pas de séance).", elapsed)
             return []
 
-        log.warning("🚨 [AlloCiné] SÉANCE(S) DU 16 DÉCEMBRE OUVERTE(S) : %d film(s) !", len(results))
-
+        # Dès que results contient des films
         for item in results:
             movie = item.get("movie", {})
             title = movie.get("title", "")
@@ -324,6 +376,11 @@ def check_allocine_16(page, log: logging.Logger) -> list[DetectedSession]:
             for k, v in showtimes_dict.items():
                 if isinstance(v, list):
                     all_st.extend(v)
+
+            if not all_st:
+                continue
+
+            log.warning("🚨 [AlloCiné] SÉANCE(S) DU 16 DÉCEMBRE OUVERTE(S) : %s (%d séance(s)) !", title, len(all_st))
 
             for st in all_st:
                 starts_at = st.get("startsAt", "")
@@ -359,16 +416,15 @@ def check_allocine_16(page, log: logging.Logger) -> list[DetectedSession]:
                     )
                 )
     except Exception as exc:
-        log.warning("[AlloCiné] Erreur vérification : %s", exc)
+        log.warning("[AlloCiné] Erreur vérification flux : %s", exc)
     return sessions
 
 
 def run_cycle(p, log: logging.Logger) -> list[DetectedSession]:
-    """Exécute un cycle complet avec Chrome configuré avec bypass DNS."""
+    """Exécute un cycle de vérification strict et transparent."""
     detected: list[DetectedSession] = []
     browser = None
     try:
-        # Résolution DNS directe intégrée pour contourner les blocages DNS du Wi-Fi
         browser = p.chromium.launch(
             channel="chrome",
             headless=True,
@@ -387,21 +443,21 @@ def run_cycle(p, log: logging.Logger) -> list[DetectedSession]:
         context.add_init_script(STEALTH_JS)
         page = context.new_page()
 
-        # 1. Vérification de la page Événement IMAX 70mm Pathé
+        # 1. Page Événement IMAX 70mm (Vérification stricte de créneau horaire)
         s_imax = check_pathe_page(page, PATHE_IMAX_EVENT_URL, "Événement IMAX 70mm", log)
         detected.extend(s_imax)
 
-        # 2. Vérification de la page Cinéma Odysseum
+        # 2. Page Cinéma Odysseum (Vérification stricte de créneau horaire)
         s_ody = check_pathe_page(page, PATHE_ODYSSEUM_URL, "Pathé Odysseum", log)
         detected.extend(s_ody)
 
-        # 3. Vérification de l'API AlloCiné pour le 16 décembre
+        # 3. Flux direct AlloCiné pour le 16 décembre
         s_ac = check_allocine_16(page, log)
         detected.extend(s_ac)
 
         page.close()
     except Exception as exc:
-        log.warning("Erreur cycle Chrome : %s", exc)
+        log.warning("Erreur technique durant le cycle Chrome : %s", exc)
     finally:
         if browser:
             try:
@@ -445,7 +501,7 @@ def main():
                     best_url = imax_first[0].url
 
                     msg = (
-                        "🚨 DUNE 3 — SÉANCE OUVERTE (DÉTECTION LOCALE PC) !\n\n"
+                        "🚨 DUNE 3 — BILLETTERIE OUVERTE !\n\n"
                         "📍 Pathé Montpellier Odysseum\n"
                         "📅 Mercredi 16 décembre 2026\n\n"
                         "🎟️ SÉANCES DISPONIBLES :\n"
@@ -460,7 +516,7 @@ def main():
                         f"🎟️ Événement IMAX 70mm : {PATHE_IMAX_EVENT_URL}\n"
                     )
 
-                    notify_all(msg, log, title="🚨 DUNE 3 DISPONIBLE (LOCAL) !", click_url=best_url)
+                    notify_all(msg, log, title="🚨 DUNE 3 DISPONIBLE !", click_url=best_url)
                     for s in fresh:
                         known_keys.add(s.key)
                     save_state(state_file, sessions)
