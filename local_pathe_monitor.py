@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Moniteur LOCAL permanent pour Dune 3 à Pathé Odysseum (Montpellier).
 
-Tourne 24h/24 en arrière-plan sur ton PC :
-1. Tente la vérification directe sur pathe.fr avec Google Chrome (mode furtif anti-détection).
-2. Effectue en parallèle la vérification AlloCiné comme filet de sécurité instantané.
-3. Dès détection d'une séance (notamment IMAX 70mm le 16 ou 15 décembre), envoie l'alerte
-   immédiate sur Telegram et ntfy avec les liens directs de réservation Pathé.
+Tourne 24h/24 en continu sur ton PC :
+1. Surveille la page officielle Événement IMAX 70mm sur pathe.fr (Statut 200 OK).
+2. Surveille la page du cinéma Pathé Odysseum (Statut 200 OK).
+3. Surveille le flux direct AlloCiné pour le 16 décembre (qui renvoie les liens Pathé).
+4. Dès détection, envoie l'alerte immédiate sur Telegram et ntfy avec les liens officiels de réservation Pathé.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Assurer l'encodage UTF-8 pour la console Windows
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -43,14 +42,14 @@ from playwright.sync_api import sync_playwright
 PARIS = ZoneInfo("Europe/Paris")
 
 # URLs Pathé Odysseum
+PATHE_ODYSSEUM_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum"
+PATHE_IMAX_EVENT_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289"
 PATHE_DEC_16_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-12-16"
 PATHE_DEC_15_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-12-15"
-PATHE_IMAX_EVENT_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289"
 
-# URLs AlloCiné (Secours / Comparaison)
+# URLs AlloCiné (P0702 = Pathé Odysseum)
 THEATER_CODE = "P0702"
 ALLOCINE_16_API = f"https://www.allocine.fr/_/showtimes/theater-{THEATER_CODE}/d-2026-12-16"
-ALLOCINE_15_API = f"https://www.allocine.fr/_/showtimes/theater-{THEATER_CODE}/d-2026-12-15"
 
 STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -76,7 +75,6 @@ class DetectedSession:
 
 
 def load_env_file(env_path: Path) -> None:
-    """Charge un fichier .env local s'il existe."""
     if not env_path.is_file():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -134,7 +132,6 @@ def notify_telegram(message: str, log: logging.Logger) -> bool:
     token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not token or not chat_id:
-        log.warning("Telegram non configuré (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant dans .env).")
         return False
     try:
         payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
@@ -158,7 +155,6 @@ def notify_ntfy(
 ) -> bool:
     topic = (os.getenv("NTFY_TOPIC") or "").strip()
     if not topic:
-        log.warning("ntfy non configuré (NTFY_TOPIC manquant dans .env).")
         return False
 
     server = (os.getenv("NTFY_SERVER") or "").strip().rstrip("/") or "https://ntfy.sh"
@@ -242,139 +238,137 @@ def is_dune_3(text: str) -> bool:
     return any(kw in t for kw in keywords)
 
 
-def check_pathe_via_chrome(page, url: str, label: str, log: logging.Logger) -> list[DetectedSession]:
-    """Tente la navigation directe vers Pathé via le Chrome local furtif."""
+def check_pathe_page(page, url: str, label: str, log: logging.Logger) -> list[DetectedSession]:
+    """Charge une page Pathé via Chrome avec résolution DNS interne."""
     sessions: list[DetectedSession] = []
     try:
-        log.info("[Pathé] Chargement de %s (%s)...", label, url)
-        res = page.goto(url, wait_until="domcontentloaded", timeout=18000)
+        log.info("[Pathé] Chargement de %s...", label)
+        res = page.goto(url, wait_until="domcontentloaded", timeout=12000)
         status = res.status if res else 0
 
-        # Fermer cookies ou bannières
+        # Fermer cookies
         for sel in ["#onetrust-accept-btn-handler", "button:has-text('Accepter')"]:
             try:
                 btn = page.locator(sel).first
-                if btn.is_visible(timeout=500):
-                    btn.click(timeout=500)
+                if btn.is_visible(timeout=300):
+                    btn.click(timeout=300)
                     break
             except Exception:
                 pass
 
         try:
-            body = page.locator("body").inner_text(timeout=2500)
+            body = page.locator("body").inner_text(timeout=2000)
         except Exception:
             body = page.content()
+
         title = page.title()
 
         if "Allo Houston" in body or status == 403:
-            log.warning("[Pathé] Akamai a renvoyé 'Allo Houston' (403) pour %s.", label)
+            log.warning("[Pathé] Page %s temporairement bloquée par Akamai (403).", label)
             return []
 
+        # Vérifier si Dune 3 est présent
         if not is_dune_3(body) and not is_dune_3(title):
-            log.info("[Pathé] %s chargé (HTTP %s) : pas de séance Dune 3 ouverte.", label, status)
+            log.info("[Pathé] %s vérifié (HTTP %s) : aucune séance Dune 3 ouverte.", label, status)
             return []
 
-        log.warning("🎯 [Pathé] DUNE 3 DÉTECTÉ SUR %s !", label)
-
-        # Vérifier si des créneaux de séances horaires sont présents (ex: 20h15, Réserver)
-        has_sessions = any(w in body.lower() for w in ["réserver", "reserver", "horaire", "séance", "seance", "billet", "complet"])
+        # Détecter si des séances ou boutons de réservation sont disponibles
+        has_book_btn = any(w in body.lower() for w in ["réserver", "reserver", "horaires", "séance", "seance", "billet", "choisir mon siège"])
         is_imax = "imax" in body.lower()
 
-        if has_sessions or "evenement" in url:
+        log.info("🎯 [Pathé] %s actif (Dune 3 présent, Réservable=%s, IMAX=%s)", label, has_book_btn, is_imax)
+
+        if has_book_btn:
             sessions.append(
                 DetectedSession(
-                    source="Pathé Direct",
+                    source="Pathé Officiel",
                     date_str="2026-12-16" if "16" in label else "2026-12-15",
-                    label=f"{label} : Séances détectées",
+                    label=f"{label} : Réservation active !",
                     format_str="IMAX 70mm" if is_imax else "Standard",
                     is_imax=is_imax,
                     url=url,
                 )
             )
     except Exception as exc:
-        log.warning("[Pathé] Erreur accès direct %s : %s", label, exc)
+        log.warning("[Pathé] Requête vers %s : %s", label, exc)
     return sessions
 
 
-def check_allocine_api(date_str: str, log: logging.Logger) -> list[DetectedSession]:
-    """Vérifie le flux interne AlloCiné (insensible à Akamai)."""
-    url = f"https://www.allocine.fr/_/showtimes/theater-{THEATER_CODE}/d-{date_str}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/133.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-    }
-    req = urllib.request.Request(url, headers=headers)
+def check_allocine_16(page, log: logging.Logger) -> list[DetectedSession]:
+    """Vérifie l'API AlloCiné directement depuis Chrome (utilise la même connexion débloquée)."""
     sessions: list[DetectedSession] = []
     try:
-        with urllib.request.urlopen(req, timeout=8) as res:
-            if res.status != 200:
-                return []
-            data = json.loads(res.read().decode("utf-8"))
-            results = data.get("results", [])
-            if not results:
-                return []
+        log.info("[AlloCiné] Vérification du flux du 16 décembre...")
+        res = page.goto(ALLOCINE_16_API, wait_until="domcontentloaded", timeout=10000)
+        if not res or res.status != 200:
+            return []
 
-            for item in results:
-                movie = item.get("movie", {})
-                title = movie.get("title", "")
-                if not is_dune_3(title) and movie.get("internalId") != 324508:
-                    continue
+        content = page.locator("body").inner_text(timeout=2000)
+        data = json.loads(content)
+        results = data.get("results", [])
 
-                showtimes_dict = item.get("showtimes", {})
-                all_st = []
-                for k, v in showtimes_dict.items():
-                    if isinstance(v, list):
-                        all_st.extend(v)
+        if not results:
+            log.info("[AlloCiné] 16 décembre : results est vide (préventes pas encore synchronisées).")
+            return []
 
-                for st in all_st:
-                    starts_at = st.get("startsAt", "")
-                    proj = st.get("projection", []) or []
-                    tags = st.get("tags", []) or []
-                    is_imax = "IMAX" in proj or any("imax" in t.lower() for t in tags)
-                    is_70mm = "F_70MM" in proj or any("70mm" in t.lower() for t in tags)
+        log.warning("🚨 [AlloCiné] SÉANCE(S) DU 16 DÉCEMBRE OUVERTE(S) : %d film(s) !", len(results))
 
-                    pathe_url = ""
-                    for t in st.get("data", {}).get("ticketing", []) or []:
-                        for u in t.get("urls", []):
-                            if "pathe.fr" in u:
-                                pathe_url = u
-                                break
-                        if pathe_url:
+        for item in results:
+            movie = item.get("movie", {})
+            title = movie.get("title", "")
+            if not is_dune_3(title) and movie.get("internalId") != 324508:
+                continue
+
+            showtimes_dict = item.get("showtimes", {})
+            all_st = []
+            for k, v in showtimes_dict.items():
+                if isinstance(v, list):
+                    all_st.extend(v)
+
+            for st in all_st:
+                starts_at = st.get("startsAt", "")
+                proj = st.get("projection", []) or []
+                tags = st.get("tags", []) or []
+                is_imax = "IMAX" in proj or any("imax" in t.lower() for t in tags)
+                is_70mm = "F_70MM" in proj or any("70mm" in t.lower() for t in tags)
+
+                pathe_url = ""
+                for t in st.get("data", {}).get("ticketing", []) or []:
+                    for u in t.get("urls", []):
+                        if "pathe.fr" in u:
+                            pathe_url = u
                             break
+                    if pathe_url:
+                        break
 
-                    if not pathe_url:
-                        pathe_url = PATHE_DEC_16_URL if date_str == "2026-12-16" else PATHE_DEC_15_URL
+                if not pathe_url:
+                    pathe_url = PATHE_DEC_16_URL
 
-                    time_m = re.search(r"T(\d{2}:\d{2})", starts_at)
-                    t_str = time_m.group(1).replace(":", "h") if time_m else starts_at
+                time_m = re.search(r"T(\d{2}:\d{2})", starts_at)
+                t_str = time_m.group(1).replace(":", "h") if time_m else starts_at
 
-                    fmt = "IMAX 70mm" if (is_imax and is_70mm) else ("IMAX" if is_imax else "Numérique")
-                    sessions.append(
-                        DetectedSession(
-                            source="AlloCiné (Flux Pathé)",
-                            date_str=date_str,
-                            label=f"Séance {t_str} - {title}",
-                            format_str=fmt,
-                            is_imax=is_imax,
-                            url=pathe_url,
-                        )
+                fmt = "IMAX 70mm" if (is_imax and is_70mm) else ("IMAX" if is_imax else "Numérique")
+                sessions.append(
+                    DetectedSession(
+                        source="AlloCiné (Flux Pathé)",
+                        date_str="2026-12-16",
+                        label=f"Séance {t_str} - {title}",
+                        format_str=fmt,
+                        is_imax=is_imax,
+                        url=pathe_url,
                     )
+                )
     except Exception as exc:
-        log.debug("[AlloCiné] Requête impossible pour %s : %s", date_str, exc)
+        log.warning("[AlloCiné] Erreur vérification : %s", exc)
     return sessions
 
 
 def run_cycle(p, log: logging.Logger) -> list[DetectedSession]:
-    """Exécute un cycle complet de surveillance (Pathé Chrome + AlloCiné)."""
+    """Exécute un cycle complet avec Chrome configuré avec bypass DNS."""
     detected: list[DetectedSession] = []
-
-    # 1. Vérification Pathé en direct via Google Chrome local
     browser = None
     try:
+        # Résolution DNS directe intégrée pour contourner les blocages DNS du Wi-Fi
         browser = p.chromium.launch(
             channel="chrome",
             headless=True,
@@ -382,6 +376,7 @@ def run_cycle(p, log: logging.Logger) -> list[DetectedSession]:
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--host-resolver-rules=MAP www.pathe.fr 2.18.64.34, MAP pathe.fr 2.18.64.34, MAP *.pathe.fr 2.18.64.34",
             ],
         )
         context = browser.new_context(
@@ -392,17 +387,21 @@ def run_cycle(p, log: logging.Logger) -> list[DetectedSession]:
         context.add_init_script(STEALTH_JS)
         page = context.new_page()
 
-        # Check Sortie 16 décembre
-        s16 = check_pathe_via_chrome(page, PATHE_DEC_16_URL, "16 décembre (Sortie)", log)
-        detected.extend(s16)
-
-        # Check Avant-première IMAX
-        s_imax = check_pathe_via_chrome(page, PATHE_IMAX_EVENT_URL, "Événement IMAX 70mm", log)
+        # 1. Vérification de la page Événement IMAX 70mm Pathé
+        s_imax = check_pathe_page(page, PATHE_IMAX_EVENT_URL, "Événement IMAX 70mm", log)
         detected.extend(s_imax)
+
+        # 2. Vérification de la page Cinéma Odysseum
+        s_ody = check_pathe_page(page, PATHE_ODYSSEUM_URL, "Pathé Odysseum", log)
+        detected.extend(s_ody)
+
+        # 3. Vérification de l'API AlloCiné pour le 16 décembre
+        s_ac = check_allocine_16(page, log)
+        detected.extend(s_ac)
 
         page.close()
     except Exception as exc:
-        log.warning("Vérification Chrome locale indisponible : %s", exc)
+        log.warning("Erreur cycle Chrome : %s", exc)
     finally:
         if browser:
             try:
@@ -410,19 +409,13 @@ def run_cycle(p, log: logging.Logger) -> list[DetectedSession]:
             except Exception:
                 pass
 
-    # 2. Vérification immédiate du flux AlloCiné pour le 16 décembre (secours immédiat)
-    ac_16 = check_allocine_api("2026-12-16", log)
-    if ac_16:
-        log.warning("🎯 [AlloCiné] Séances du 16 décembre détectées dans le flux !")
-        detected.extend(ac_16)
-
     return detected
 
 
 def main():
     parser = argparse.ArgumentParser(description="Moniteur Local 24h/24 Dune 3 Pathé Odysseum")
-    parser.add_argument("--interval", type=int, default=60, help="Intervalle en secondes entre deux vérifications (défaut: 60s)")
-    parser.add_argument("--once", action="store_true", help="N'exécute qu'une seule vérification et quitte")
+    parser.add_argument("--interval", type=int, default=60, help="Intervalle en secondes entre vérifications")
+    parser.add_argument("--once", action="store_true", help="N'exécute qu'un seul cycle et quitte")
     args = parser.parse_args()
 
     project_dir = Path(__file__).parent
@@ -432,13 +425,9 @@ def main():
 
     log.info("==========================================================")
     log.info("🚀 Démarrage du moniteur LOCAL Dune 3 — Pathé Odysseum")
-    log.info("📍 Surveillance : 16 décembre (Sortie) & Événement IMAX 70mm")
+    log.info("📍 Surveillance : Événement IMAX 70mm + Odysseum + Flux 16 déc.")
     log.info("⏱️  Intervalle : %d secondes", args.interval)
-    log.info(
-        "📱 Canaux : Telegram (%s), ntfy (%s)",
-        "Actif" if os.getenv("TELEGRAM_BOT_TOKEN") else "Inactif (configure dans .env)",
-        "Actif" if os.getenv("NTFY_TOPIC") else "Inactif (configure dans .env)",
-    )
+    log.info("📱 Canaux : Telegram (%s), ntfy (%s)", "Actif" if os.getenv("TELEGRAM_BOT_TOKEN") else "Inactif", "Actif" if os.getenv("NTFY_TOPIC") else "Inactif")
     log.info("==========================================================")
 
     state = load_state(state_file)
@@ -456,7 +445,7 @@ def main():
                     best_url = imax_first[0].url
 
                     msg = (
-                        "🚨 DUNE 3 — BILLETTERIE OUVERTE (DÉTECTION LOCALE PC) !\n\n"
+                        "🚨 DUNE 3 — SÉANCE OUVERTE (DÉTECTION LOCALE PC) !\n\n"
                         "📍 Pathé Montpellier Odysseum\n"
                         "📅 Mercredi 16 décembre 2026\n\n"
                         "🎟️ SÉANCES DISPONIBLES :\n"
@@ -467,8 +456,8 @@ def main():
 
                     msg += (
                         f"\n🔗 Liens directs :\n"
-                        f"📅 Page du 16 décembre : {PATHE_DEC_16_URL}\n"
-                        f"🎟️ Page IMAX 70mm : {PATHE_IMAX_EVENT_URL}\n"
+                        f"📅 Sortie 16 décembre : {PATHE_DEC_16_URL}\n"
+                        f"🎟️ Événement IMAX 70mm : {PATHE_IMAX_EVENT_URL}\n"
                     )
 
                     notify_all(msg, log, title="🚨 DUNE 3 DISPONIBLE (LOCAL) !", click_url=best_url)
