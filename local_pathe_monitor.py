@@ -47,6 +47,8 @@ PARIS = ZoneInfo("Europe/Paris")
 
 # URLs ciblées pour le 16 décembre 2026 (Sortie nationale)
 IMAX_16_URL = "https://www.pathe.fr/evenements/dune-troisieme-partie-projection-imax-70mm-55289/filters/date-2026-12-16"
+PATHE_FILM_16_URL = "https://www.pathe.fr/films/dune-troisieme-partie-50828/filters/date-2026-12-16"
+PATHE_FILM_URL = "https://www.pathe.fr/films/dune-troisieme-partie-50828"
 PATHE_DEC_16_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-12-16"
 
 # Flux AlloCiné (P0702 = Pathé Odysseum)
@@ -473,7 +475,16 @@ def run_cycle_if_else(p, log: logging.Logger) -> tuple[str, list[DetectedSession
             return "IMAX 70mm", sessions_imax
 
         # =========================================================================
-        # 2. ELIF : Vérification Page Cinéma Pathé Odysseum (16 décembre)
+        # 2. ELIF : Vérification Fiche Film Officielle Dune 3 (16 décembre)
+        # =========================================================================
+        sessions_film = check_pathe_page(page, PATHE_FILM_16_URL, "Fiche Film Dune 3 (16 déc.)", log)
+        if sessions_film:
+            log.info("🎯 Trouvé sur la fiche officielle du film ! Pas besoin de vérifier le reste.")
+            page.close()
+            return "Fiche Film Pathé", sessions_film
+
+        # =========================================================================
+        # 3. ELIF : Vérification Page Cinéma Pathé Odysseum (16 décembre)
         # =========================================================================
         sessions_cinema = check_pathe_page(page, PATHE_DEC_16_URL, "Cinéma Pathé Odysseum (16 déc.)", log)
         if sessions_cinema:
@@ -525,8 +536,9 @@ def main():
     log.info("🌐 Moteur : %s (%s)", browser_name, browser_exe or "défaut")
     log.info("📐 Logique : Système en cascade IF/ELIF/ELSE sans redondance")
     log.info("   1. IF   : Page Événement IMAX 70mm (16 déc.)")
-    log.info("   2. ELIF : Page Cinéma Odysseum (16 déc.)")
-    log.info("   3. ELIF : Flux officiel AlloCiné (16 déc.)")
+    log.info("   2. ELIF : Fiche Film Officielle Dune 3 (16 déc.)")
+    log.info("   3. ELIF : Page Cinéma Odysseum (16 déc.)")
+    log.info("   4. ELIF : Flux officiel AlloCiné (16 déc.)")
     log.info("⏱️  Intervalle : %d secondes", args.interval)
     log.info("📱 Canaux : Telegram (%s), ntfy (%s)", "Actif" if os.getenv("TELEGRAM_BOT_TOKEN") else "Inactif", "Actif" if os.getenv("NTFY_TOPIC") else "Inactif")
     log.info("==========================================================")
