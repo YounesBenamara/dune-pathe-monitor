@@ -281,45 +281,42 @@ def check_bound() -> int:
         )
         page = context.new_page()
 
-        # 0. Étape d'initialisation : Visite de la page d'accueil pour obtenir les cookies de session Akamai
-        log.info("Initialisation de la session sur https://www.pathe.fr/ ...")
+        # 0. Étape d'initialisation : Visite de la page d'accueil (HTTP 200)
+        log.info("Initialisation sur https://www.pathe.fr/ ...")
         try:
             home_resp = page.goto("https://www.pathe.fr/", wait_until="domcontentloaded", timeout=25_000)
             log.info("Accueil HTTP : %s", home_resp.status if home_resp else "None")
             dismiss_overlays(page)
             page.wait_for_timeout(2_000)
-            cookie_names = [c["name"] for c in context.cookies()]
-            log.info("Cookies obtenus : %s", cookie_names)
         except Exception as e:
             log.warning("Erreur initialisation accueil : %s", e)
 
-        # 1. Navigation vers l'URL officielle avec filtre de date
-        log.info("Chargement de : %s", BOUND_URL)
-        loaded = False
+        # 1. Tentative de recherche directe du film "Bound" via la barre de recherche du site
+        log.info("Recherche du film 'Bound' sur le site...")
         try:
-            resp = page.goto(BOUND_URL, wait_until="domcontentloaded", timeout=30_000)
-            log.info("Code HTTP reçu : %s", resp.status if resp else "None")
-            if resp and resp.status < 400:
-                loaded = True
-            elif resp and resp.status in (403, 429, 503):
-                log.warning("Accès direct au filtre bloqué (HTTP %s). Tentative via page cinéma...", resp.status)
+            search_input = page.locator("input[type='search'], input[type='text'], input[placeholder*='Recherch'], input[placeholder*='film']").first
+            if search_input.count() > 0:
+                log.info("Champ de recherche trouvé, saisie de 'Bound'...")
+                search_input.fill("Bound")
+                page.wait_for_timeout(2_000)
+                # Résultats de recherche
+                results_text = normalise(page.locator("body").inner_text(timeout=3_000))
+                if is_bound(results_text):
+                    log.info("🎯 'Bound' repéré dans les suggestions de recherche !")
         except Exception as e:
-            log.warning("Erreur accès direct : %s", e)
+            log.debug("Erreur recherche : %s", e)
 
-        # Si l'accès direct a été bloqué, charger la page d'accueil cinéma puis cliquer sur le 18 sept
-        if not loaded:
-            try:
-                log.info("Chargement de la page cinéma : %s", CINEMA_URL)
-                page.goto(CINEMA_URL, wait_until="domcontentloaded", timeout=25_000)
-                dismiss_overlays(page)
-                day_button = page.locator("button, a").filter(has_text=re.compile(r"18.*sept|sept.*18|ven\. 18", re.IGNORECASE)).first
-                if day_button.count() > 0:
-                    log.info("Bouton du 18 septembre trouvé, clic en cours...")
-                    day_button.click(timeout=3_000)
-                    page.wait_for_timeout(2_000)
-                    loaded = True
-            except Exception as e:
-                log.error("Échec du chargement alternatif : %s", e)
+        # 2. Navigation SPA vers Odysseum
+        log.info("Recherche du lien Odysseum sur la page...")
+        try:
+            ody_link = page.locator("a[href*='odysseum']").first
+            if ody_link.count() > 0:
+                log.info("Lien Odysseum trouvé : %s", ody_link.get_attribute("href"))
+                ody_link.click(timeout=5_000)
+                page.wait_for_timeout(3_000)
+                log.info("Navigation SPA vers Odysseum réussie : URL=%s, Titre=%r", page.url, page.title())
+        except Exception as e:
+            log.debug("Navigation SPA : %s", e)
 
         dismiss_overlays(page)
         page.wait_for_timeout(2_000)
