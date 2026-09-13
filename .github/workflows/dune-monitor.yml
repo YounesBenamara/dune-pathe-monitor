@@ -1,12 +1,19 @@
-name: Surveiller Dune 3 — Pathé Odysseum
+name: Surveiller Dune 3 — Pathé Odysseum (AlloCiné)
 
 on:
+  schedule:
+    # Surveillance automatique régulière (toutes les 15 minutes)
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force_notify:
-        description: "Forcer l'envoi de l'alerte même si déjà connue"
+        description: "Forcer l'envoi de l'alerte de test (Telegram / ntfy)"
         type: boolean
         default: false
+      target_date:
+        description: "Date cible (format YYYY-MM-DD, ex: 2026-12-16)"
+        type: string
+        default: "2026-12-16"
   repository_dispatch:
     types: [monitor_check]
 
@@ -28,29 +35,19 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Cache Playwright Chromium
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-
       - name: Installer les dépendances
         run: |
           python -m pip install -r requirements.txt
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
-            python -m playwright install --with-deps chromium
-          fi
 
       # Le cache persiste les séances déjà vues entre deux serveurs temporaires.
       - name: Restaurer l'état précédent
         uses: actions/cache/restore@v4
         with:
           path: state
-          key: dune-pathe-state-v2-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: dune-pathe-state-v2-
+          key: dune-pathe-state-v3-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: dune-pathe-state-v3-
 
-      - name: Vérifier Pathé et alerter (Telegram / ntfy)
+      - name: Vérifier AlloCiné et alerter (Telegram / ntfy)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -58,12 +55,16 @@ jobs:
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
         run: |
           mkdir -p state
-          python dune_pathe_monitor.py --data-dir state ${{ inputs.force_notify && '--force-notify' || '' }}
+          TARGET_DATE="${{ inputs.target_date || '2026-12-16' }}"
+          CMD=(python dune_pathe_monitor.py --data-dir state --date "$TARGET_DATE")
+          if [ "${{ inputs.force_notify }}" = "true" ]; then
+            CMD+=(--force-notify)
+          fi
+          "${CMD[@]}"
 
       - name: Sauvegarder le nouvel état
         if: always()
         uses: actions/cache/save@v4
         with:
           path: state
-          key: dune-pathe-state-v2-${{ github.run_id }}-${{ github.run_attempt }}
-
+          key: dune-pathe-state-v3-${{ github.run_id }}-${{ github.run_attempt }}
