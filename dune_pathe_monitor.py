@@ -489,6 +489,7 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
     known_keys = set(state.get("active_session_keys", []))
     all_detected_sessions: list[Session] = []
     total_fresh_notified = 0
+    force_notified_sent = False
 
     try:
         with sync_playwright() as p:
@@ -505,27 +506,65 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
                 context = create_stealth_context(browser)
                 sources_ok = 0
 
-                # 1. ÉTAPE PRIORITAIRE : Avant-première IMAX 70mm (Alerte instantanée dès la seconde 3)
-                try:
-                    imax_sessions = check_imax_event_page(context, log)
-                    all_detected_sessions.extend(imax_sessions)
-                    sources_ok += 1
-
-                    fresh_imax = [s for s in imax_sessions if s.key not in known_keys]
-                    if fresh_imax:
-                        send_immediate_alert(fresh_imax, IMAX_EVENT_URL, "Avant-première IMAX 70mm", log)
-                        for s in fresh_imax:
-                            known_keys.add(s.key)
-                        total_fresh_notified += len(fresh_imax)
-                        state["active_session_keys"] = list(known_keys)
-                        save_state(state_file, all_detected_sessions)
-                except Exception as exc:
-                    log.warning("Erreur vérification page IMAX : %s", exc)
-
-                # 2. ÉTAPE DATE PAR DATE (Alerte instantanée dès qu'un jour précis a des places)
+                # 1. ÉTAPE PRIORITAIRE N°1 : Le 16 décembre (Jour 1 de sortie nationale)
                 cinema_page = context.new_page()
                 try:
-                    for offset in range(days):
+                    day_16_url = f"{CINEMA_URL}?date={start.isoformat()}"
+                    try:
+                        day_16_sessions = check_single_date_page(cinema_page, start, log)
+                        all_detected_sessions.extend(day_16_sessions)
+                        sources_ok += 1
+
+                        fresh_16 = [s for s in day_16_sessions if s.key not in known_keys]
+                        if fresh_16:
+                            send_immediate_alert(fresh_16, day_16_url, "16 décembre (Jour 1)", log)
+                            for s in fresh_16:
+                                known_keys.add(s.key)
+                            total_fresh_notified += len(fresh_16)
+                            state["active_session_keys"] = list(known_keys)
+                            save_state(state_file, all_detected_sessions)
+                        elif force_notify and not force_notified_sent:
+                            # Test manuel déclenché immédiatement dès la seconde 2 sans attendre les autres jours
+                            test_msg = (
+                                "🧪 [TEST MANUEL] Moniteur Dune 3 — Pathé Odysseum\n\n"
+                                "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
+                                "ℹ️ Le 16 décembre a été vérifié en priorité : aucune séance n'est ouverte pour le moment (zéro faux positif).\n"
+                                "La surveillance continue pour l'IMAX 70mm et les autres dates.\n\n"
+                                "🔗 Liens d'accès direct :\n"
+                                f"📅 Séances du 16 décembre :\n{DECEMBER_16_URL}\n\n"
+                                f"🎟️ Avant-première IMAX 70mm :\n{IMAX_EVENT_URL}"
+                            )
+                            log.info("Envoi immédiat du test manuel dès la vérification du 16 décembre.")
+                            notify_all(
+                                test_msg,
+                                log,
+                                title="[TEST] Moniteur Dune 3 - Pathe Odysseum",
+                                tags="test_tube,white_check_mark",
+                                priority="default",
+                            )
+                            force_notified_sent = True
+                    except Exception as day_16_exc:
+                        log.error("Erreur vérification 16 décembre : %s", day_16_exc)
+
+                    # 2. ÉTAPE PRIORITAIRE N°2 : Page Événement Avant-première IMAX 70mm
+                    try:
+                        imax_sessions = check_imax_event_page(context, log)
+                        all_detected_sessions.extend(imax_sessions)
+                        sources_ok += 1
+
+                        fresh_imax = [s for s in imax_sessions if s.key not in known_keys]
+                        if fresh_imax:
+                            send_immediate_alert(fresh_imax, IMAX_EVENT_URL, "Avant-première IMAX 70mm", log)
+                            for s in fresh_imax:
+                                known_keys.add(s.key)
+                            total_fresh_notified += len(fresh_imax)
+                            state["active_session_keys"] = list(known_keys)
+                            save_state(state_file, all_detected_sessions)
+                    except Exception as exc:
+                        log.warning("Erreur vérification page IMAX : %s", exc)
+
+                    # 3. ÉTAPE DATES SUIVANTES (17 au 22 décembre)
+                    for offset in range(1, days):
                         day = start + timedelta(days=offset)
                         day_url = f"{CINEMA_URL}?date={day.isoformat()}"
                         try:
@@ -535,7 +574,7 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
 
                             fresh_day = [s for s in day_sessions if s.key not in known_keys]
                             if fresh_day:
-                                label = "16 décembre (Jour 1)" if offset == 0 else pathé_date_label(day)
+                                label = pathé_date_label(day)
                                 send_immediate_alert(fresh_day, day_url, f"Séances du {label}", log)
                                 for s in fresh_day:
                                     known_keys.add(s.key)
@@ -604,7 +643,7 @@ def check(start: date, days: int, data_dir: Path, force_notify: bool = False) ->
     if force_notify:
         if unique_sessions and total_fresh_notified == 0:
             send_immediate_alert(unique_sessions, DECEMBER_16_URL, "Séances disponibles", log)
-        elif total_fresh_notified == 0:
+        elif not force_notified_sent and total_fresh_notified == 0:
             test_message = (
                 "🧪 [TEST MANUEL] Moniteur Dune 3 — Pathé Odysseum\n\n"
                 "✅ Vos notifications Telegram et ntfy fonctionnent parfaitement !\n\n"
