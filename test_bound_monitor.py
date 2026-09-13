@@ -281,6 +281,18 @@ def check_bound() -> int:
         )
         page = context.new_page()
 
+        # 0. Étape d'initialisation : Visite de la page d'accueil pour obtenir les cookies de session Akamai
+        log.info("Initialisation de la session sur https://www.pathe.fr/ ...")
+        try:
+            home_resp = page.goto("https://www.pathe.fr/", wait_until="domcontentloaded", timeout=25_000)
+            log.info("Accueil HTTP : %s", home_resp.status if home_resp else "None")
+            dismiss_overlays(page)
+            page.wait_for_timeout(2_000)
+            cookie_names = [c["name"] for c in context.cookies()]
+            log.info("Cookies obtenus : %s", cookie_names)
+        except Exception as e:
+            log.warning("Erreur initialisation accueil : %s", e)
+
         # 1. Navigation vers l'URL officielle avec filtre de date
         log.info("Chargement de : %s", BOUND_URL)
         loaded = False
