@@ -12,12 +12,10 @@ import re
 import sys
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 BOUND_URL = "https://www.pathe.fr/cinemas/cinema-pathe-odysseum/filters/date-2026-09-18"
@@ -146,7 +144,6 @@ def is_valid_showtime(text: str) -> bool:
 
 
 def is_bound(text: str) -> bool:
-    """Détecte le mot Bound (insensible à la casse, mot entier)."""
     return bool(re.search(r"\bbound\b", text, re.IGNORECASE))
 
 
@@ -159,9 +156,9 @@ def dismiss_overlays(page) -> None:
     ]:
         try:
             btn = page.locator(selector).first
-            if btn.is_visible(timeout=500):
-                btn.click(timeout=500)
-                page.wait_for_timeout(150)
+            if btn.is_visible(timeout=800):
+                btn.click(timeout=800)
+                page.wait_for_timeout(300)
                 break
         except Exception:
             pass
@@ -184,7 +181,6 @@ def extract_bound_sessions(page, context_label: str = "ven. 18 sept.") -> list[S
         if is_bound(card_text):
             matched_cards.append((card, card_text))
 
-    # Si pas de carte explicite trouvée, chercher l'élément texte Bound et son conteneur
     if not matched_cards:
         try:
             nodes = page.get_by_text(re.compile(r"\bbound\b", re.IGNORECASE)).all()
@@ -203,7 +199,7 @@ def extract_bound_sessions(page, context_label: str = "ven. 18 sept.") -> list[S
         for el in elements:
             try:
                 text = normalise(el.inner_text(timeout=800))
-                if not text or len(text) > 40:
+                if not text or len(text) > 50:
                     continue
                 t_lower = text.lower()
                 is_time = is_valid_showtime(text)
@@ -237,7 +233,6 @@ def extract_bound_sessions(page, context_label: str = "ven. 18 sept.") -> list[S
             except Exception:
                 continue
 
-    # Fallback : si Bound est présent mais sans bouton de séance isolé
     if not results and matched_cards:
         card, card_text = matched_cards[0]
         href = ""
@@ -250,7 +245,7 @@ def extract_bound_sessions(page, context_label: str = "ven. 18 sept.") -> list[S
                     break
         except Exception:
             pass
-        results.append(Session(context_label, f"Film Bound présent au programme ({card_text[:80]}...)", url=href))
+        results.append(Session(context_label, f"Film Bound au programme ({card_text[:80]}...)", url=href))
 
     return results
 
@@ -260,88 +255,124 @@ def check_bound() -> int:
     log.info("🧪 [TEST BOUND] Début de la vérification pour le film BOUND le 18 septembre 2026...")
 
     with sync_playwright() as p:
-        try:
-            browser = p.firefox.launch(headless=True)
-            log.info("Lancement avec Firefox...")
-        except Exception as e:
-            log.info("Firefox non dispo (%s), fallback Chromium...", e)
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-infobars",
-                ],
-            )
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+            ],
+        )
 
         context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/133.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1920, "height": 1080},
             locale="fr-FR",
             timezone_id="Europe/Paris",
+            extra_http_headers={
+                "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Ch-Ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            },
         )
+        context.add_init_script(STEALTH_INIT_SCRIPT)
         page = context.new_page()
 
-        # 0. Étape d'initialisation : Visite de la page d'accueil (HTTP 200)
-        log.info("Initialisation sur https://www.pathe.fr/ ...")
+        # 1. Chargement de l'accueil pour session Akamai valide (HTTP 200)
+        log.info("1. Initialisation sur https://www.pathe.fr/ ...")
         try:
-            home_resp = page.goto("https://www.pathe.fr/", wait_until="domcontentloaded", timeout=25_000)
-            log.info("Accueil HTTP : %s", home_resp.status if home_resp else "None")
-            dismiss_overlays(page)
-            page.wait_for_timeout(2_000)
+            resp = page.goto("https://www.pathe.fr/", wait_until="domcontentloaded", timeout=25_000)
+            log.info("Accueil HTTP : %s", resp.status if resp else "None")
         except Exception as e:
-            log.warning("Erreur initialisation accueil : %s", e)
+            log.warning("Erreur accueil : %s", e)
 
-        # 1. Tentative de recherche directe du film "Bound" via la barre de recherche du site
-        log.info("Recherche du film 'Bound' sur le site...")
-        try:
-            search_input = page.locator("input[type='search'], input[type='text'], input[placeholder*='Recherch'], input[placeholder*='film']").first
-            if search_input.count() > 0:
-                log.info("Champ de recherche trouvé, saisie de 'Bound'...")
-                search_input.fill("Bound")
-                page.wait_for_timeout(2_000)
-                # Résultats de recherche
-                results_text = normalise(page.locator("body").inner_text(timeout=3_000))
-                if is_bound(results_text):
-                    log.info("🎯 'Bound' repéré dans les suggestions de recherche !")
-        except Exception as e:
-            log.debug("Erreur recherche : %s", e)
+        dismiss_overlays(page)
 
-        # 2. Navigation SPA vers Odysseum
-        log.info("Recherche du lien Odysseum sur la page...")
+        # Simulation de présence humaine pour validation Akamai telemetry
+        page.mouse.move(250, 250)
+        page.wait_for_timeout(500)
+        page.mouse.move(500, 300)
+        page.wait_for_timeout(1_000)
+
+        # 2. Navigation vers la page Odysseum 18 sept
+        log.info("2. Navigation vers Odysseum (18 sept)...")
+        nav_ok = False
         try:
-            ody_link = page.locator("a[href*='odysseum']").first
-            if ody_link.count() > 0:
-                log.info("Lien Odysseum trouvé : %s", ody_link.get_attribute("href"))
-                ody_link.click(timeout=5_000)
-                page.wait_for_timeout(3_000)
-                log.info("Navigation SPA vers Odysseum réussie : URL=%s, Titre=%r", page.url, page.title())
+            page.evaluate("""() => {
+                const a = document.createElement('a');
+                a.href = '/cinemas/cinema-pathe-odysseum/filters/date-2026-09-18';
+                a.id = 'link-direct-bound';
+                a.innerText = 'Test Bound';
+                document.body.appendChild(a);
+            }""")
+            with page.expect_navigation(timeout=15_000):
+                page.click("#link-direct-bound")
+            nav_ok = True
+            log.info("Navigation interne par clic réussie : %s", page.url)
         except Exception as e:
-            log.debug("Navigation SPA : %s", e)
+            log.info("Transition par clic interne non terminée (%s), tentative goto direct avec referer...", e)
+
+        if not nav_ok or "403" in page.title() or "Allo Houston" in normalise(page.locator("body").inner_text(timeout=2_000)):
+            try:
+                page.goto(
+                    BOUND_URL,
+                    referer="https://www.pathe.fr/",
+                    wait_until="domcontentloaded",
+                    timeout=20_000,
+                )
+            except Exception as e:
+                log.warning("Erreur goto BOUND_URL : %s", e)
 
         dismiss_overlays(page)
         page.wait_for_timeout(2_000)
 
         body = normalise(page.locator("body").inner_text(timeout=5_000))
         title = page.title()
-        log.info("Page chargée : titre=%r, aperçu=%r", title, body[:120])
+        log.info("Page Odysseum chargée : URL=%s, Titre=%r, Aperçu=%r", page.url, title, body[:120])
+
+        # 3. Si on est sur la page Odysseum mais que la date 18 sept n'est pas sélectionnée, cliquer l'onglet "18"
+        if not is_bound(body) and "odysseum" in page.url.lower():
+            log.info("Recherche du bouton '18 sept.' dans le carrousel des dates...")
+            date_btns = page.locator("button, a, [role='tab'], [class*='date'], [class*='day']").all()
+            for btn in date_btns:
+                try:
+                    bt = normalise(btn.inner_text(timeout=500))
+                    if ("18" in bt and ("sept" in bt.lower() or "ven" in bt.lower())) or bt == "18":
+                        log.info("Bouton date 18 trouvé : %r -> Clic !", bt)
+                        btn.click()
+                        page.wait_for_timeout(3_000)
+                        body = normalise(page.locator("body").inner_text(timeout=5_000))
+                        break
+                except Exception:
+                    continue
+
+        if "Allo Houston" in body:
+            log.error("❌ Page toujours bloquée par Akamai (Allo Houston).")
+            return 1
 
         if not is_bound(body):
-            log.warning("❌ 'Bound' non trouvé dans le texte de la page du 18 septembre.")
-            # Envoi d'une notification de test pour vérifier que les canaux marchent même si film non affiché
+            log.warning("❌ 'Bound' non détecté sur la page du 18 septembre.")
             test_msg = (
                 "🧪 [TEST BOUND] Moniteur Pathé Odysseum\n\n"
-                "ℹ️ La page du 18 septembre a été vérifiée mais le film 'Bound' n'a pas été détecté dans le contenu rendu.\n"
+                "ℹ️ La page du cinéma Odysseum est accessible (non bloquée) mais Bound n'a pas été détecté.\n"
                 f"📅 Lien direct :\n{BOUND_URL}"
             )
             notify_all(test_msg, log, title="[TEST] Bound non trouvé", click_url=BOUND_URL)
             browser.close()
             return 0
 
-        log.info("🎯 'BOUND' DÉTECTÉ SUR LA PAGE ! Extraction des séances...")
+        log.info("🎯 'BOUND' DÉTECTÉ SUR LA PAGE ! Extraction de la séance...")
         sessions = extract_bound_sessions(page, "ven. 18 sept.")
         log.info("%d séance(s) trouvée(s) pour Bound.", len(sessions))
 
-        # Construction du message d'alerte réel
+        # Construction du message d'alerte
         message = "🚨 BOUND – SÉANCE DISPONIBLE AU PATHÉ ODYSSEUM !\n(ven. 18 sept.)\n\n"
         lines = []
         first_res_url = ""
@@ -354,7 +385,7 @@ def check_bound() -> int:
             lines.append(item)
 
         if not lines:
-            lines.append("• [ven. 18 sept.] Séance programmée détectée sur la page")
+            lines.append("• [ven. 18 sept.] Séance programmée détectée sur la grille")
 
         message += "\n".join(lines)
         message += (
